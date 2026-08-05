@@ -1,7 +1,7 @@
 import pandas as pd
 import re
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 
 class ShellConverter:
@@ -19,21 +19,8 @@ class ShellConverter:
         self.shell_file = shell_file
         self.car_file = car_file
         self.output_file = output_file
-        self.export_date = None
-        self.df_output = None  # 保存转换后的数据
+        self.df_output = None  # 保存转换后的数
 
-    def _get_export_date(self):
-        """获取导单日期"""
-        try:
-            file_create_time = os.path.getctime(self.shell_file)
-            self.export_date = datetime.fromtimestamp(file_create_time).date()
-            return self.export_date
-        except FileNotFoundError:
-            self.export_date = datetime.now().date()
-            return self.export_date
-        except Exception as e:
-            self.export_date = datetime.now().date()
-            return self.export_date
 
     def _read_car_mapping(self):
         """读取车型映射"""
@@ -109,9 +96,7 @@ class ShellConverter:
         car_dict = self._read_car_mapping()
         car_file_status = "成功" if car_dict else "未找到或为空"
 
-        # 获取导单日期
-        self._get_export_date()
-        base_date = self.export_date
+       
 
         # 提取所需列
         actual_cols = {
@@ -122,15 +107,18 @@ class ShellConverter:
             "目的地地址": "送达方地址",
             "物料": "物料",
             "发货量": "发货量",
-            "送达方": "送达方"
+            "送达方": "送达方",
+            "要求到厂日期": "要求到厂日期"
         }
         needed_cols = list(actual_cols.values())
         df_sub = df[needed_cols].copy()
 
+        df_sub["要求到厂日期"] = pd.to_datetime(df_sub["要求到厂日期"], errors="coerce")
+
         # 应用转换规则
-        df_sub["客户订单时间"] = base_date + timedelta(days=1)
-        df_sub["计划发货时间"] = base_date + timedelta(days=3)
-        df_sub["计划到达时间"] = base_date + timedelta(days=3)
+        df_sub["客户订单时间"] = df_sub["要求到厂日期"] - timedelta(days=1)
+        df_sub["计划发货时间"] = df_sub["要求到厂日期"] 
+        df_sub["计划到达时间"] = df_sub["要求到厂日期"] + timedelta(days=1)
 
         #df_sub["客户订单号"] = df_sub["SAP订单号"]
         df_sub["客户订单号"] = df_sub["SAP订单号"].apply(self._extract_first_order_no)
@@ -141,7 +129,7 @@ class ShellConverter:
         df_sub["物料描述"] = df_sub["物料"]
 
         df_sub["物料数量"] = pd.to_numeric(df_sub["发货量"], errors="coerce").fillna(0)
-        df_sub["物料体积"] = df_sub["物料数量"]
+        df_sub["物料体积"] = df_sub["物料数量"] * 3
         df_sub["物料重量"] = df_sub["物料数量"] * 1000
 
         df_sub["始发地编号"] = df_sub["发货方"]

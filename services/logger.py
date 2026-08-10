@@ -158,26 +158,38 @@ def read_entries(limit: int = 1000) -> List[Dict[str, Any]]:
 def group_by_run(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """按 run_id 聚合成一次次执行，最新的排前面。
 
-    每组的 status 取最严重的那个：只要有 fail 就是 fail。
+    每组的 status 取最严重的那个：只要出现过 fail 就算 fail。
     """
     runs: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
 
     for entry in entries:
         run_id = entry.get("run_id") or "-"
-        if run_id not in runs:
-            runs[run_id] = {
+        run = runs.get(run_id)
+        if run is None:
+            run = {
                 "run_id": run_id,
                 "entries": [],
                 "status": "info",
                 "started_at": entry.get("ts", ""),
                 "ended_at": entry.get("ts", ""),
             }
-            order.append(run_id)
-        run = runs[run_id]
+            runs[run_id] = run
+
         run["entries"].append(entry)
         run["ended_at"] = entry.get("ts", run["ended_at"])
 
         status = entry.get("status")
         if status == "fail":
-            run["status"]
+            run["status"] = "fail"
+        elif status == "success" and run["status"] != "fail":
+            run["status"] = "success"
+        elif status == "warn" and run["status"] not in ("fail", "success"):
+            run["status"] = "warn"
+
+    return sorted(runs.values(), key=lambda r: r.get("started_at") or "", reverse=True)
+
+
+def latest_run(entries: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+    """最近一次执行，托盘图标用它决定显示正常还是报警。"""
+    runs = group_by_run(entries if entries is not None else read_entries())
+    return runs[0] if runs else None

@@ -1,13 +1,15 @@
 """程序入口。
 
-当前支持命令行模式，方便在没有 UI 的情况下先把整条链路跑通：
+不带参数直接双击 / 运行 → 启动图形界面。
 
+命令行模式主要用于排查问题和无人值守执行：
+
+    python main.py                                        # 启动界面
+    python main.py ui --minimized                         # 启动后直接进托盘（开机自启用的就是这个）
     python main.py convert 订单.xlsx -c 车型.xlsx        # 转换并放进待上传队列
     python main.py upload                                 # 立即上传队列里最新的文件
     python main.py config --username 13100000000          # 修改配置
     python main.py password                               # 交互式录入密码（存入凭据管理器）
-
-UI 模式（python main.py ui）在下一批接入。
 """
 
 from __future__ import annotations
@@ -22,6 +24,24 @@ from services import credentials
 from services.config import UPLOAD_FILENAME, Config, pending_dir
 from services.logger import setup
 from services.scheduler import run_upload_once
+from services.single_instance import ensure_single_instance
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    # 两个实例同时到点会同时开浏览器，同一个 SDCC 账号会互相踢下线
+    if not ensure_single_instance():
+        print("程序已在运行，看一下系统托盘")
+        return 1
+
+    # 延迟导入：命令行模式下不应该因为没装 PySide6 就跑不了
+    try:
+        from ui.main_window import run_app
+    except ImportError as exc:
+        print(f"界面依赖没装全：{exc}")
+        print("请执行：pip install -r requirements.txt")
+        return 1
+
+    return run_app(start_minimized=args.minimized)
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
@@ -63,6 +83,9 @@ def cmd_config(args: argparse.Namespace) -> int:
     if args.headless is not None:
         config.headless = args.headless
         changed = True
+    if args.auto is not None:
+        config.auto_upload_enabled = args.auto
+        changed = True
     if changed:
         config.save()
         print(f"已保存：{Config.path()}")
@@ -99,7 +122,11 @@ def cmd_password(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="shell-convert", description="壳牌订单转换与 SDCC 自动上传")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+
+    p_ui = sub.add_parser("ui", help="启动图形界面（默认）")
+    p_ui.add_argument("--minimized", action="store_true", help="启动后直接进托盘，不弹窗口")
+    p_ui.set_defaults(func=cmd_ui)
 
     p_convert = sub.add_parser("convert", help="转换并放入待上传队列")
     p_convert.add_argument("shell_file", help="壳牌订单 Excel")
@@ -118,6 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("--schedule-time", dest="schedule_time", help="格式 HH:MM")
     p_config.add_argument("--headless", dest="headless", action="store_true", default=None)
     p_config.add_argument("--no-headless", dest="headless", action="store_false")
+    p_config.add_argument("--auto", dest="auto", action="store_true", default=None, help="开启自动上传")
+    p_config.add_argument("--no-auto", dest="auto", action="store_false")
     p_config.set_defaults(func=cmd_config)
 
     p_password = sub.add_parser("password", help="录入 SDCC 密码")
@@ -128,8 +157,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    setup(console=True)
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # 双击 exe 时没有参数；开机自启只传 --minimized。两种都补上 ui 子命令
+    if not argv or argv[0].startswith("-"):
+        argv.insert(0, "ui")
+
     args = build_parser().parse_args(argv)
+
+    # 界面模式下没有控制台，写 stdout 反而会在打包后报错
+    setup(console=args.command != "ui")
     return args.func(args)
 
 

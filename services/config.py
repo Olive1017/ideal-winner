@@ -24,7 +24,7 @@ EXCEL_SUFFIXES = {".xlsx", ".xls"}
 
 DEFAULT_LOGIN_URL = "https://tms.i.sinotrans.com/sdccweb/manage/"
 DEFAULT_PROJECT = "中海壳牌深圳"
-DEFAULT_TEMPLATE = "中海壳牌深圳-中海壳牌导入模板"
+DEFAULT_TEMPLATE = "中海壳牌深圳-中海壳牌导入模版"
 
 PathLike = Union[str, Path]
 
@@ -148,7 +148,7 @@ class Config:
     # 浏览器
     browser_channels: List[str] = field(default_factory=lambda: ["chrome", "msedge"])
     headless: bool = False
-    timeout_ms: int = 30_000
+    timeout_ms: int = 100_000
     result_timeout_ms: int = 120_000
 
     # 其他

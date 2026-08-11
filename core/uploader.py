@@ -1,10 +1,13 @@
 """SDCC TMS 订单导入 RPA（Playwright）。
 
-流程与人工操作一致：
-    登录 → 我的工作台 → 订单中心 → 订单管理 → 导入 → 导入订单
+全流程无人值守：用保存的账号密码自动登录，然后
+    我的工作台 → 订单中心 → 订单管理 → 导入 → 导入订单
     → 选项目 → 选模板 → 上传文件 → 读取上传结果
 
 所有异常都归一成 ``UploadError`` 并带上 ``ErrorKind``，由调度器决定是否重试。
+
+注意：如果 SDCC 对该账号启用了短信验证码，自动登录会失败并归为 FATAL（重试没用），
+需要人到 IAM 侧关掉验证码要求，或改成先人工登录再复用会话。
 """
 
 from __future__ import annotations
@@ -28,8 +31,41 @@ ProgressCallback = Optional[Callable[[str, str, str], None]]
 SUCCESS_PATTERN = re.compile(r"成功|完成")
 FAILURE_PATTERN = re.compile(r"失败|错误|异常|不存在|不合法|校验不通过|无效")
 
-# 出现这些字样说明是账号/密码问题，重试没有意义
+# 出现这些字样说明是账号/密码/验证码问题，重试没有意义
 AUTH_FAILURE_PATTERN = re.compile(r"密码|账号|帐号|用户名|验证码|锁定|冻结|不存在")
+
+# IAM 点「登录」后会自动弹出的「登录说明」页，不是登录页，要排除掉
+GUIDE_URL_PATTERN = re.compile(r"loginInfoIframe", re.IGNORECASE)
+
+# 登录 iframe，用来在一堆标签页里认出真正的登录页
+LOGIN_IFRAME_SELECTOR = "#iam_iframe_sdk"
+
+# 登录表单的 placeholder。只取稳定的片段做模糊匹配——
+# IAM 实际写的是「用户编号/手机号码/邮箱」，写全了反而容易因为改文案而失配。
+USERNAME_PLACEHOLDER = "用户编号"
+PASSWORD_PLACEHOLDER = "密码"
+
+# 判定「已登录」只认一个信号：「我的工作台」按钮可见。详见 _is_logged_in 的说明。
+WORKBENCH_BUTTON = "我的工作台"
+
+# 订单管理页的「导入」按钮。SDCC 给它挂了 sdccDropBtn 这个自定义 class，
+# 比按文案找稳；它同时是 el-popover 的触发元素，点完会弹出一个浮层菜单。
+IMPORT_BUTTON_SELECTOR = "button.sdccDropBtn"
+IMPORT_MENU_ITEM = "导入订单"
+
+# 「1.上传准备」那一行有两个控件，而且是两种不同的下拉：
+# - 项目：远程搜索，可输入筛选，placeholder 是「请输入关键字选择」
+# - 模板：标准 el-select，input 带 readonly，只能点开选，placeholder 是「请选择」
+# 所以不能用 nth(0)/nth(1) 按位置取，必须各认各的 placeholder。
+# 两个串互不包含（「请输入关键字选择」里没有连着的「请选择」），不会误匹配。
+PROJECT_PLACEHOLDER = "请输入关键字选择"
+TEMPLATE_PLACEHOLDER = "请选择"
+
+# 下拉浮层里的选项。Element UI 把浮层挂在 body 上并统一带 el-popper class，
+# 所以一条并集选择器就能同时覆盖 el-select 和 el-autocomplete 两种下拉。
+# 必须带 :visible：没展开的浮层也还在 DOM 里，详见 _find_dropdown_option。
+# 不用裸 li——那会把左侧菜单也算进去，点中就跳页了。
+OPTION_SELECTOR = ".el-popper li:visible, .el-autocomplete-suggestion li:visible"
 
 # 弹窗里的固定文案，读取结果时要排除掉
 STATIC_DIALOG_TEXT = {
@@ -50,6 +86,7 @@ STATIC_DIALOG_TEXT = {
 
 DROPDOWN_TIMEOUT_MS = 8_000
 POLL_INTERVAL_MS = 1_000
+PAGE_SCAN_INTERVAL_SEC = 0.5
 
 
 # --------------------------------------------------------------------------- #
@@ -95,8 +132,88 @@ def _launch_browser(playwright, config, logger):
     )
 
 
+def _page_url(page) -> str:
+    """安全地取页面 URL；页面刚关掉时不要因此炸掉调用方。"""
+    try:
+        return page.url or ""
+    except PlaywrightError:
+        return ""
+
+
+def _live_pages(context) -> list:
+    return [p for p in context.pages if not p.is_closed()]
+
+
+def _open_page_urls(context) -> list:
+    return [_page_url(p) for p in _live_pages(context)]
+
+
+def _close_guide_pages(context, logger) -> int:
+    """关掉 IAM 自动弹出的「登录说明」页。
+
+    点「登录」之后 IAM 会额外开一个纯指引页，跟登录无关。关掉它是为了
+    后面遍历标签页找登录页/工作台时不被它干扰。
+    """
+    closed = 0
+    for candidate in list(context.pages):
+        if candidate.is_closed():
+            continue
+        if not GUIDE_URL_PATTERN.search(_page_url(candidate)):
+            continue
+        try:
+            candidate.close()
+            closed += 1
+        except PlaywrightError:
+            continue
+    if closed:
+        logger.info("login", f"已关闭「登录说明」页 {closed} 个")
+    return closed
+
+
+def _is_logged_in(page) -> bool:
+
+    try:
+        return page.get_by_role("button", name=WORKBENCH_BUTTON).first.is_visible()
+    except PlaywrightError:
+        return False
+
+
+def _find_logged_in_page(context):
+    """在所有标签页里找已登录的那个，找不到返回 None。
+
+    登录完成后工作台可能落在任意一个标签页上，所以必须全都看一遍，
+    并且把找到的页面交回去当作后续操作的对象。
+    """
+    for candidate in _live_pages(context):
+        if GUIDE_URL_PATTERN.search(_page_url(candidate)):
+            continue
+        if _is_logged_in(candidate):
+            return candidate
+    return None
+
+
+def _find_login_page(context, timeout_ms: int):
+    """在所有标签页里找带登录 iframe 的那个。
+
+    登录页可能是点「登录」后新开的弹窗，也可能是原页面直接跳转过去的，
+    所以不能只在「新增的页面」里找，也不能假设第一个弹出的就是它。
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for candidate in _live_pages(context):
+            if GUIDE_URL_PATTERN.search(_page_url(candidate)):
+                continue
+            try:
+                if candidate.locator(LOGIN_IFRAME_SELECTOR).count() > 0:
+                    return candidate
+            except PlaywrightError:
+                continue
+        time.sleep(PAGE_SCAN_INTERVAL_SEC)
+    return None
+
+
 def _read_login_error(frame) -> str:
-    """尽力从登录 iframe 里抓出错误提示文案。"""
+    """尽力从登录 iframe 里抓出错误提示文案，用来判断是不是账号密码问题。"""
     for selector in (".el-message--error", ".el-form-item__error", ".error-tip", "[class*='error']"):
         try:
             locator = frame.locator(selector).first
@@ -120,81 +237,221 @@ def _extract_result_text(dialog_text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 登录
+# --------------------------------------------------------------------------- #
+
+
+def _auto_login(page, context, config, password: str, logger):
+    """用保存的账号密码自动登录，返回已登录的那个标签页。"""
+    if not config.username or not password:
+        raise UploadError("自动登录需要账号和密码，请先到「设置」里录入", ErrorKind.FATAL)
+
+    logger.start("login", f"自动登录：{config.username}")
+    # exact=True 很重要：页面上还有「登录说明」「退出登录」这类文案，
+    # 默认的子串匹配会把它们一起命中。
+    page.get_by_role("button", name="登录", exact=True).first.click()
+
+    # 点「登录」之后，IAM 会额外弹一个「登录说明」页，跟登录页的先后顺序不固定。
+    # 所以按「有没有登录 iframe」来认页面，而不是用 expect_popup 拿第一个弹窗。
+    login_page = _find_login_page(context, config.timeout_ms)
+    _close_guide_pages(context, logger)
+
+    if login_page is None or login_page.is_closed():
+        raise UploadError(
+            "点击登录后没找到登录页（IAM 登录 iframe 未出现）",
+            ErrorKind.RETRYABLE,
+            "当前标签页：" + (" | ".join(_open_page_urls(context)) or "无"),
+        )
+
+    try:
+        login_page.bring_to_front()
+    except PlaywrightError:
+        pass
+
+    # 定位器不跨 iframe 边界，必须先 frame_locator 进去再找输入框。
+    frame = login_page.frame_locator(LOGIN_IFRAME_SELECTOR)
+    frame.get_by_placeholder(USERNAME_PLACEHOLDER).first.fill(config.username)
+    frame.get_by_placeholder(PASSWORD_PLACEHOLDER).first.fill(password)
+    frame.get_by_role("button", name="登录").first.click()
+
+    deadline = time.monotonic() + config.timeout_ms / 1000
+    while time.monotonic() < deadline:
+        _close_guide_pages(context, logger)
+        found = _find_logged_in_page(context)
+        if found is not None:
+            logger.success("login", f"账号 {config.username} 登录成功")
+            return found
+        time.sleep(PAGE_SCAN_INTERVAL_SEC)
+
+    detail = ""
+    if not login_page.is_closed():
+        detail = _read_login_error(frame)
+    detail = detail or "登录后未跳转回主页面（可能要求短信验证码）"
+    kind = ErrorKind.FATAL if AUTH_FAILURE_PATTERN.search(detail) else ErrorKind.RETRYABLE
+    raise UploadError(f"登录失败：{detail}", kind)
+
+
+def _ensure_logged_in(page, config, password: str, logger, report):
+    """保证进入登录态，返回后续操作应该使用的标签页。
+
+    返回值很重要：登录完成后工作台不一定还在我们最初打开的那个标签页上。
+    """
+    context = page.context
+
+    logger.start("login", "打开 SDCC")
+    page.goto(config.login_url, wait_until="domcontentloaded")
+    _close_guide_pages(context, logger)
+
+    # 浏览器带着有效会话进来的情况，直接跳过登录
+    already = _find_logged_in_page(context)
+    if already is not None:
+        logger.success("login", "当前已是登录态，跳过登录")
+        report("login", "success", "已处于登录态")
+        return already
+
+    return _auto_login(page, context, config, password, logger)
+
+
+# --------------------------------------------------------------------------- #
 # 各步骤
 # --------------------------------------------------------------------------- #
 
 
-def _login(page, config, password: str, logger) -> None:
-    logger.start("login", "打开 SDCC 登录页")
-    page.goto(config.login_url, wait_until="domcontentloaded")
+def _find_import_button(page, config, logger):
+    """找订单管理页上的「导入」按钮，并等到它可见。
 
-    with page.expect_popup(timeout=config.timeout_ms) as popup_info:
-        page.get_by_role("button", name="登录").first.click()
-    login_page = popup_info.value
-    login_page.wait_for_load_state("domcontentloaded")
+    用 SDCC 自己挂的 sdccDropBtn class 定位，不怕改文案；再按「导入」二字过滤，
+    是因为同一行上可能还有别的 sdccDropBtn 按钮（比如导出）。
 
-    frame = login_page.frame_locator("#iam_iframe_sdk")
-    frame.get_by_placeholder("用户编号/手机号/邮箱").fill(config.username)
-    frame.get_by_placeholder("密码").fill(password)
-    frame.get_by_role("button", name="确定").click()
-
-    # 登录成功后弹窗会自动关闭；失败则停在原地并给出提示
+    这里刻意不等「订单管理」标签页出现——SDCC 的标签栏是自定义组件，没有标准
+    tab 角色，等它只会白白卡满超时。直接等下一步真正要点的东西。
+    """
+    button = page.locator(IMPORT_BUTTON_SELECTOR).filter(has_text=re.compile(r"导入")).first
     try:
-        login_page.wait_for_event("close", timeout=config.timeout_ms)
+        button.wait_for(state="visible", timeout=config.timeout_ms)
     except PlaywrightTimeout as exc:
-        detail = _read_login_error(frame) or "登录后未跳转回主页面"
-        kind = ErrorKind.FATAL if AUTH_FAILURE_PATTERN.search(detail) else ErrorKind.RETRYABLE
-        raise UploadError(f"登录失败：{detail}", kind) from exc
+        raise UploadError(
+            "订单管理页上找不到「导入」按钮",
+            ErrorKind.RETRYABLE,
+            "页面可能还没加载完，或者当前账号没有导入权限",
+        ) from exc
+    return button
 
-    page.wait_for_load_state("networkidle")
-    logger.success("login", f"账号 {config.username} 登录成功")
+
+def _click_popover_item(page, reference, text: str, logger) -> None:
+    """点击 el-popover 浮层里的菜单项。
+
+    el-popover 的内容不渲染在按钮内部，而是挂到 body 底下的独立节点，
+    通过按钮的 aria-describedby 关联。按这个 id 精确定位，
+    避免点到页面别处同名的元素。
+    """
+    popover_id = reference.get_attribute("aria-describedby") or ""
+    if not popover_id:
+        raise UploadError(
+            "「导入」按钮上没有 aria-describedby，无法定位浮层菜单",
+            ErrorKind.RETRYABLE,
+        )
+
+    item = page.locator(f"#{popover_id}").get_by_text(text, exact=True).first
+    try:
+        item.wait_for(state="visible", timeout=DROPDOWN_TIMEOUT_MS)
+    except PlaywrightTimeout as exc:
+        raise UploadError(f"点开「导入」后没有出现「{text}」菜单项", ErrorKind.RETRYABLE) from exc
+    item.click()
+    logger.info("dialog", f"已在浮层 #{popover_id} 里点击「{text}」")
 
 
 def _open_import_dialog(page, config, logger):
     logger.start("navigate", "进入订单管理")
-    page.get_by_role("button", name="我的工作台").first.click()
+    page.get_by_role("button", name=WORKBENCH_BUTTON).first.click()
     page.get_by_role("menuitem", name=re.compile("订单中心")).locator("div").first.click()
     page.get_by_text("订单管理", exact=True).first.click()
-    page.get_by_role("tab", name="订单管理").first.wait_for(
-        state="visible", timeout=config.timeout_ms
-    )
+
+    import_button = _find_import_button(page, config, logger)
     logger.success("navigate", "已进入订单管理")
 
     logger.start("dialog", "打开导入订单弹窗")
-    page.get_by_role("button", name=re.compile(r"^导入")).first.click()
-    page.get_by_text("导入订单", exact=True).first.click()
+    import_button.click()
+    _click_popover_item(page, import_button, IMPORT_MENU_ITEM, logger)
 
-    dialog = page.get_by_role("dialog").filter(has_text="导入 - 订单").first
-    dialog.wait_for(state="visible", timeout=config.timeout_ms)
+    # 不按标题文案找弹窗。「导入 - 订单」这几个字里连字符两边到底有没有空格，
+    # 猜错了就是又一次「明明开了却报超时」。改成按内容特征认：
+    # 里面有「请输入关键字选择」输入框的那个 dialog 就是它，
+    # 而这恰好就是下一步要填的东西。
+    dialog = page.get_by_role("dialog").filter(
+        has=page.get_by_placeholder(PROJECT_PLACEHOLDER)
+    ).first
+    dialog.get_by_placeholder(PROJECT_PLACEHOLDER).first.wait_for(
+        state="visible", timeout=config.timeout_ms
+    )
     logger.success("dialog", "导入弹窗已打开")
     return dialog
 
 
-def _select_option(page, dialog, index: int, keyword: str, field_name: str, logger) -> None:
-    """输入关键词 → 等下拉出现 → 点击列表项。
+def _find_dropdown_option(page, keyword: str, field_name: str):
+    """在当前展开的下拉浮层里找选项。
 
-    不用「填完直接回车」，因为下拉是异步加载的，回车经常选不中。
+    两个关键点：
+
+    1. 从 page 找而不是从 dialog 找——Element UI 把浮层挂在 body 上，不在弹窗里。
+    2. OPTION_SELECTOR 里的 :visible 不能去掉。没展开的浮层也还在 DOM 里，
+       而模板选项「中海壳牌深圳-中海壳牌导入模版」包含项目名「中海壳牌深圳」，
+       has_text 是子串匹配，不先排除隐藏元素的话 .first 会拿到那个隐藏的 li，
+       然后死等一个永远不会可见的东西。
+    """
+    options = page.locator(OPTION_SELECTOR)
+    hit = options.filter(has_text=keyword).first
+    try:
+        hit.wait_for(state="visible", timeout=DROPDOWN_TIMEOUT_MS)
+        return hit
+    except PlaywrightTimeout as exc:
+        try:
+            seen = [t.strip() for t in options.all_inner_texts() if t.strip()]
+        except PlaywrightError:
+            seen = []
+        raise UploadError(
+            f"下拉列表里找不到{field_name}「{keyword}」；"
+            f"当前可见选项：{seen if seen else '无（浮层没展开）'}",
+            ErrorKind.FATAL,
+        ) from exc
+
+
+def _select_option(
+    page, dialog, placeholder: str, keyword: str, field_name: str, config, logger
+) -> None:
+    """展开下拉 → （能输入就）输入关键词 → 点击列表项。
+
+    按 placeholder 而不是按 nth(0)/nth(1) 取控件：项目和模板是两种不同的下拉，
+    placeholder 各不相同，按位置取不但会取不到，顺序一变还会静默填错字段。
+
+    也不用「填完直接回车」，因为下拉是异步加载的，回车经常选不中。
     """
     logger.start("select", f"选择{field_name}：{keyword}")
-    box = dialog.get_by_placeholder("请输入关键字选择").nth(index)
-    box.click()
-    box.fill(keyword)
 
-    option = page.get_by_role("option").filter(has_text=keyword).first
+    box = dialog.get_by_placeholder(placeholder).first
     try:
-        option.wait_for(state="visible", timeout=DROPDOWN_TIMEOUT_MS)
-    except PlaywrightTimeout:
-        option = page.locator("li").filter(has_text=keyword).first
-        try:
-            option.wait_for(state="visible", timeout=DROPDOWN_TIMEOUT_MS)
-        except PlaywrightTimeout as exc:
-            # 选项压根不存在，多半是配置里的名称写错了，重试无意义
-            raise UploadError(
-                f"下拉列表里找不到{field_name}「{keyword}」，请到设置里核对名称",
-                ErrorKind.FATAL,
-            ) from exc
+        box.wait_for(state="visible", timeout=config.timeout_ms)
+    except PlaywrightTimeout as exc:
+        raise UploadError(
+            f"导入弹窗里找不到{field_name}下拉框（placeholder「{placeholder}」）",
+            ErrorKind.FATAL,
+        ) from exc
 
-    option.click()
+    box.click()  # 先展开浮层
+
+    # el-select 不支持筛选时 input 是 readonly，fill() 会直接报错。
+    # readonly 是布尔属性，值可能是空字符串，所以要跟 None 比，不能直接判真假。
+    if box.get_attribute("readonly") is None:
+        # 必须用真实按键，不能用 fill()。fill() 是直接赋 value + 只发一个 input
+        # 事件，项目那个远程搜索下拉收不到，就永远不发查询请求，浮层一直是空的。
+        # 这个坑实测踩过：字打进去了，但页面上一个可见浮层都没有。
+        box.fill("")
+        try:
+            box.press_sequentially(keyword, delay=60)
+        except (AttributeError, PlaywrightError):
+            box.type(keyword, delay=60)  # 老版 Playwright 没有 press_sequentially
+
+    _find_dropdown_option(page, keyword, field_name).click()
     logger.success("select", f"{field_name}已选择：{keyword}")
 
 
@@ -255,8 +512,8 @@ def _close_dialog(dialog, logger) -> None:
 def upload_file(
     file_path: PathLike,
     config,
-    password: str,
-    logger,
+    password: str = "",
+    logger=None,
     screenshot_dir: Optional[PathLike] = None,
     progress: ProgressCallback = None,
 ) -> str:
@@ -265,7 +522,7 @@ def upload_file(
     Args:
         file_path: 待上传的 Excel。
         config: services.config.Config 实例。
-        password: 从 keyring 取出的密码，绝不落盘。
+        password: 从 keyring 取出的密码，自动登录必填。
         logger: services.logger.RunLogger 实例。
         screenshot_dir: 出错时截图存放目录。
         progress: 可选回调 ``(step, status, message)``，UI 用来实时显示进度。
@@ -295,17 +552,21 @@ def upload_file(
         page = context.new_page()
 
         try:
-            report("login", "start", "正在登录 SDCC")
-            _login(page, config, password, logger)
-            report("login", "success", "登录成功")
+            report("login", "start", "正在打开 SDCC")
+            # 注意要接住返回值：登录后工作台可能在另一个标签页上
+            page = _ensure_logged_in(page, config, password, logger, report)
 
             report("navigate", "start", "正在进入订单管理")
             dialog = _open_import_dialog(page, config, logger)
             report("navigate", "success", "导入弹窗已打开")
 
             report("select", "start", "正在选择项目和模板")
-            _select_option(page, dialog, 0, config.project, "项目", logger)
-            _select_option(page, dialog, 1, config.template, "模板", logger)
+            _select_option(
+                page, dialog, PROJECT_PLACEHOLDER, config.project, "项目", config, logger
+            )
+            _select_option(
+                page, dialog, TEMPLATE_PLACEHOLDER, config.template, "模板", config, logger
+            )
             report("select", "success", "项目和模板已选择")
 
             report("upload", "start", f"正在上传 {path.name}")

@@ -1,17 +1,6 @@
-"""SDCC TMS 订单导入 RPA（Playwright）。
-
-全流程无人值守：用保存的账号密码自动登录，然后
-    我的工作台 → 订单中心 → 订单管理 → 导入 → 导入订单
-    → 选项目 → 选模板 → 上传文件 → 读取上传结果
-
-所有异常都归一成 ``UploadError`` 并带上 ``ErrorKind``，由调度器决定是否重试。
-
-注意：如果 SDCC 对该账号启用了短信验证码，自动登录会失败并归为 FATAL（重试没用），
-需要人到 IAM 侧关掉验证码要求，或改成先人工登录再复用会话。
-"""
-
 from __future__ import annotations
 
+import os
 import re
 import time
 from datetime import datetime
@@ -39,32 +28,15 @@ GUIDE_URL_PATTERN = re.compile(r"loginInfoIframe", re.IGNORECASE)
 
 # 登录 iframe，用来在一堆标签页里认出真正的登录页
 LOGIN_IFRAME_SELECTOR = "#iam_iframe_sdk"
-
-# 登录表单的 placeholder。只取稳定的片段做模糊匹配——
-# IAM 实际写的是「用户编号/手机号码/邮箱」，写全了反而容易因为改文案而失配。
 USERNAME_PLACEHOLDER = "用户编号"
 PASSWORD_PLACEHOLDER = "密码"
-
-# 判定「已登录」只认一个信号：「我的工作台」按钮可见。详见 _is_logged_in 的说明。
 WORKBENCH_BUTTON = "我的工作台"
-
-# 订单管理页的「导入」按钮。SDCC 给它挂了 sdccDropBtn 这个自定义 class，
-# 比按文案找稳；它同时是 el-popover 的触发元素，点完会弹出一个浮层菜单。
 IMPORT_BUTTON_SELECTOR = "button.sdccDropBtn"
 IMPORT_MENU_ITEM = "导入订单"
-
-# 「1.上传准备」那一行有两个控件，而且是两种不同的下拉：
-# - 项目：远程搜索，可输入筛选，placeholder 是「请输入关键字选择」
-# - 模板：标准 el-select，input 带 readonly，只能点开选，placeholder 是「请选择」
-# 所以不能用 nth(0)/nth(1) 按位置取，必须各认各的 placeholder。
-# 两个串互不包含（「请输入关键字选择」里没有连着的「请选择」），不会误匹配。
 PROJECT_PLACEHOLDER = "请输入关键字选择"
 TEMPLATE_PLACEHOLDER = "请选择"
 
-# 下拉浮层里的选项。Element UI 把浮层挂在 body 上并统一带 el-popper class，
-# 所以一条并集选择器就能同时覆盖 el-select 和 el-autocomplete 两种下拉。
-# 必须带 :visible：没展开的浮层也还在 DOM 里，详见 _find_dropdown_option。
-# 不用裸 li——那会把左侧菜单也算进去，点中就跳页了。
+
 OPTION_SELECTOR = ".el-popper li:visible, .el-autocomplete-suggestion li:visible"
 
 # 弹窗里的固定文案，读取结果时要排除掉
@@ -88,6 +60,18 @@ DROPDOWN_TIMEOUT_MS = 8_000
 POLL_INTERVAL_MS = 1_000
 PAGE_SCAN_INTERVAL_SEC = 0.5
 
+# 带会话进来后，最多花多久确认「不需要登录」。会话有效时落地页不会出现
+# 「登录」按钮，这段时间会等满，所以设短一点，别让每次成功上传都白等。
+LOGIN_STATE_PROBE_MS = 8_000
+
+# 「我的工作台」按钮：账号密码登录后的落地页要先点它；会话恢复的落地页没有它。
+# 等这么久还没出现就当它不存在，直接跳到订单中心，不作为硬前置。
+WORKBENCH_WAIT_MS = 3_000
+
+# 人工登录（python main.py login）最多等多久，以及等待期间多久播报一次
+MANUAL_LOGIN_TIMEOUT_MS = 600_000
+LOGIN_HEARTBEAT_SEC = 30.0
+
 
 # --------------------------------------------------------------------------- #
 # 辅助
@@ -108,17 +92,21 @@ def _capture_screenshot(page, screenshot_dir: Optional[Path], run_id: str) -> Op
         return None
 
 
-def _launch_browser(playwright, config, logger):
+def _launch_browser(playwright, config, logger, headless: Optional[bool] = None):
     """优先 Chrome，起不来就降级 Edge，都没有才报错。
 
     不打包 Chromium，是为了把分发给同事的 exe 控制在合理体积。
+
+    ``headless`` 传 None 表示按配置走；人工登录那条路必须看得见窗口，
+    会显式传 False 把配置盖掉。
     """
     channels = list(config.browser_channels or ["chrome"])
+    want_headless = bool(config.headless) if headless is None else bool(headless)
     last_error: Optional[Exception] = None
     for channel in channels:
         try:
             browser = playwright.chromium.launch(
-                channel=channel, headless=bool(config.headless)
+                channel=channel, headless=want_headless
             )
             logger.info("browser", f"已启动浏览器：{channel}")
             return browser
@@ -212,6 +200,28 @@ def _find_login_page(context, timeout_ms: int):
     return None
 
 
+def _wait_for_login(context, timeout_ms: int, logger):
+    """轮询等待登录完成，返回已登录的标签页；超时返回 None。
+
+    自动登录和人工登录共用这一段：两者的差别只在「谁来填表单」，
+    「怎么算登录成功」必须是同一个判定，否则又会出现
+    「手动能过、自动过不了」这种没法排查的情况。
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    next_beat = time.monotonic() + LOGIN_HEARTBEAT_SEC
+    while time.monotonic() < deadline:
+        _close_guide_pages(context, logger)
+        found = _find_logged_in_page(context)
+        if found is not None:
+            return found
+        now = time.monotonic()
+        if now >= next_beat:
+            logger.info("login", f"仍在等待登录完成……剩余约 {(deadline - now) / 60:.0f} 分钟")
+            next_beat = now + LOGIN_HEARTBEAT_SEC
+        time.sleep(PAGE_SCAN_INTERVAL_SEC)
+    return None
+
+
 def _read_login_error(frame) -> str:
     """尽力从登录 iframe 里抓出错误提示文案，用来判断是不是账号密码问题。"""
     for selector in (".el-message--error", ".el-form-item__error", ".error-tip", "[class*='error']"):
@@ -237,16 +247,90 @@ def _extract_result_text(dialog_text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 会话（storage_state）
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_session_file(session_file: Optional[PathLike]) -> Optional[Path]:
+    """None 表示用默认位置。
+
+    这里是**延迟导入**：services.scheduler 在模块顶层导入 core.uploader，
+    如果 core.uploader 也在顶层导入 services.config，两个包就互相依赖了。
+    放进函数体里，等真正调用时才解析，绕开成环。
+    """
+    if session_file is not None:
+        return Path(session_file)
+    try:
+        from services.config import session_path
+
+        return session_path()
+    except Exception:  # noqa: BLE001 - 拿不到就当作不启用会话复用
+        return None
+
+
+def _new_context(browser, config, session_file: Optional[Path], logger):
+    """建 context，能复用会话就带上 storage_state。
+
+    storage_state 里存的是 cookie + localStorage，也就是「我已登录」和
+    「这台机器过过验证码」这两件事。带上它，服务器就认得这个浏览器，
+    不会再发短信。
+    """
+    reuse = bool(getattr(config, "reuse_session", True))
+    state: Optional[str] = None
+
+    if not reuse:
+        logger.info("login", "配置里关掉了会话复用，本次全新登录")
+    elif session_file is not None and session_file.exists():
+        state = str(session_file)
+        logger.info("login", f"载入已保存的会话：{session_file.name}")
+    else:
+        logger.info("login", "没有已保存的会话，本次需要登录")
+
+    if state is None:
+        return browser.new_context(accept_downloads=False)
+
+    try:
+        return browser.new_context(accept_downloads=False, storage_state=state)
+    except (PlaywrightError, ValueError) as exc:
+        # 会话文件损坏不该让整个任务挂掉，退回全新 context 走正常登录
+        logger.warn("login", f"会话文件无法载入，已忽略：{exc}")
+        return browser.new_context(accept_downloads=False)
+
+
+def _save_storage_state(context, session_file: Optional[Path], logger) -> bool:
+    """把当前登录状态写进 session.json。
+
+    存盘失败**绝不能**影响已经成功的上传，所以这里吞掉所有异常只记警告。
+    """
+    if session_file is None:
+        return False
+    try:
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=str(session_file))
+    except Exception as exc:  # noqa: BLE001
+        logger.warn("login", f"会话保存失败：{exc}")
+        return False
+
+    # 文件里是活的登录凭证，等价于密码。Windows 上 chmod 基本无效，改不动就算了。
+    try:
+        os.chmod(str(session_file), 0o600)
+    except OSError:
+        pass
+
+    logger.info("login", f"会话已保存：{session_file}")
+    return True
+
+
+# --------------------------------------------------------------------------- #
 # 登录
 # --------------------------------------------------------------------------- #
 
 
-def _auto_login(page, context, config, password: str, logger):
-    """用保存的账号密码自动登录，返回已登录的那个标签页。"""
-    if not config.username or not password:
-        raise UploadError("自动登录需要账号和密码，请先到「设置」里录入", ErrorKind.FATAL)
+def _open_login_page(page, context, config, logger):
+    """点首页的「登录」，把真正的登录页找出来并置前。
 
-    logger.start("login", f"自动登录：{config.username}")
+    自动登录和人工登录共用。找不到就返回 None，由调用方决定是报错还是让人接手。
+    """
     # exact=True 很重要：页面上还有「登录说明」「退出登录」这类文案，
     # 默认的子串匹配会把它们一起命中。
     page.get_by_role("button", name="登录", exact=True).first.click()
@@ -257,16 +341,32 @@ def _auto_login(page, context, config, password: str, logger):
     _close_guide_pages(context, logger)
 
     if login_page is None or login_page.is_closed():
-        raise UploadError(
-            "点击登录后没找到登录页（IAM 登录 iframe 未出现）",
-            ErrorKind.RETRYABLE,
-            "当前标签页：" + (" | ".join(_open_page_urls(context)) or "无"),
-        )
+        return None
 
     try:
         login_page.bring_to_front()
     except PlaywrightError:
         pass
+    return login_page
+
+
+def _auto_login(page, context, config, password: str, logger):
+    """用保存的账号密码自动登录，返回已登录的那个标签页。"""
+    if not config.username or not password:
+        raise UploadError(
+            "没有可复用的会话，也没有账号密码。"
+            "请先到「设置」里录入账号密码，或跑一次 python main.py login",
+            ErrorKind.FATAL,
+        )
+
+    logger.start("login", f"自动登录：{config.username}")
+    login_page = _open_login_page(page, context, config, logger)
+    if login_page is None:
+        raise UploadError(
+            "点击登录后没找到登录页（IAM 登录 iframe 未出现）",
+            ErrorKind.RETRYABLE,
+            "当前标签页：" + (" | ".join(_open_page_urls(context)) or "无"),
+        )
 
     # 定位器不跨 iframe 边界，必须先 frame_locator 进去再找输入框。
     frame = login_page.frame_locator(LOGIN_IFRAME_SELECTOR)
@@ -274,21 +374,39 @@ def _auto_login(page, context, config, password: str, logger):
     frame.get_by_placeholder(PASSWORD_PLACEHOLDER).first.fill(password)
     frame.get_by_role("button", name="登录").first.click()
 
-    deadline = time.monotonic() + config.timeout_ms / 1000
-    while time.monotonic() < deadline:
-        _close_guide_pages(context, logger)
-        found = _find_logged_in_page(context)
-        if found is not None:
-            logger.success("login", f"账号 {config.username} 登录成功")
-            return found
-        time.sleep(PAGE_SCAN_INTERVAL_SEC)
+    found = _wait_for_login(context, config.timeout_ms, logger)
+    if found is not None:
+        logger.success("login", f"账号 {config.username} 登录成功")
+        return found
 
     detail = ""
     if not login_page.is_closed():
         detail = _read_login_error(frame)
-    detail = detail or "登录后未跳转回主页面（可能要求短信验证码）"
-    kind = ErrorKind.FATAL if AUTH_FAILURE_PATTERN.search(detail) else ErrorKind.RETRYABLE
-    raise UploadError(f"登录失败：{detail}", kind)
+    detail = detail or "登录后没有跳转回主页面，多半是被要求短信验证码"
+
+    if AUTH_FAILURE_PATTERN.search(detail):
+        # 验证码 / 密码错 / 账号锁定，重试多少次都一样，必须人来处理。
+        raise UploadError(
+            f"自动登录失败：{detail}。"
+            "如果是验证码，说明这台机器的设备信任已过期，"
+            "跑一次 python main.py login 人工登录并保存会话即可",
+            ErrorKind.FATAL,
+        )
+    raise UploadError(f"自动登录失败：{detail}", ErrorKind.RETRYABLE)
+
+
+def _need_login(page, timeout_ms: int, logger):
+    
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        _close_guide_pages(page.context, logger)
+        try:
+            if page.get_by_role("button", name="登录", exact=True).first.is_visible():
+                return True
+        except PlaywrightError:
+            pass
+        time.sleep(PAGE_SCAN_INTERVAL_SEC)
+    return False
 
 
 def _ensure_logged_in(page, config, password: str, logger, report):
@@ -302,14 +420,118 @@ def _ensure_logged_in(page, config, password: str, logger, report):
     page.goto(config.login_url, wait_until="domcontentloaded")
     _close_guide_pages(context, logger)
 
-    # 浏览器带着有效会话进来的情况，直接跳过登录
-    already = _find_logged_in_page(context)
-    if already is not None:
-        logger.success("login", "当前已是登录态，跳过登录")
-        report("login", "success", "已处于登录态")
-        return already
+    # 第一级：判据是落地页有没有「登录」按钮。会话有效时（本例）直接就是
+    # 登录后的样子、没有「登录」按钮；会话无效时 .../manage/ 会给一个「登录」按钮。
+    # 不再依赖「我的工作台」——那是账号密码登录后才有、会话恢复的落地页上根本没有。
+    if not _need_login(page, LOGIN_STATE_PROBE_MS, logger):
+        logger.success("login", "会话有效，跳过登录")
+        report("login", "success", "会话有效，跳过登录")
+        return page
 
+    # 第二级：会话过期了，但浏览器里的设备信任标记通常命更长，
+    # 这时候账号密码往往能直接进，服务器不会再发短信。
+    logger.info("login", "会话无效或不存在，改用账号密码登录")
+    report("login", "start", "会话已失效，正在用账号密码登录")
     return _auto_login(page, context, config, password, logger)
+
+
+def _prefill_credentials(page, context, config, password: str, logger) -> None:
+    """人工登录时，把能自动填的先填上，验证码留给人。
+
+    这里**故意不点提交**：验证码填在哪一步、要不要先点一次「确定」才出现，
+    各家 IAM 不一样。猜错了就是白白报一个错误提示，还不如让人自己点。
+
+    任何一步失败都只记警告不抛异常——大不了整个表单你自己输，
+    这一步只是省事，不是流程前提。
+    """
+    try:
+        login_page = _open_login_page(page, context, config, logger)
+    except PlaywrightError as exc:
+        logger.warn("login", f"没点到首页的「登录」按钮，请手动点开登录页：{exc}")
+        return
+
+    if login_page is None:
+        logger.warn("login", "没自动找到登录页，请在浏览器里手动操作")
+        return
+
+    if not config.username or not password:
+        logger.info("login", "没有保存账号或密码，请手动输入完整表单")
+        return
+
+    try:
+        frame = login_page.frame_locator(LOGIN_IFRAME_SELECTOR)
+        frame.get_by_placeholder(USERNAME_PLACEHOLDER).first.fill(config.username)
+        frame.get_by_placeholder(PASSWORD_PLACEHOLDER).first.fill(password)
+        logger.info("login", f"已自动填入账号 {config.username} 和密码")
+    except PlaywrightError as exc:
+        logger.warn("login", f"自动填账号密码失败，请手动输入：{exc}")
+
+
+def save_session(
+    config,
+    logger,
+    password: str = "",
+    session_file: Optional[PathLike] = None,
+    timeout_ms: int = MANUAL_LOGIN_TIMEOUT_MS,
+) -> Path:
+    """人工登录一次，把登录状态存成 storage_state 供以后复用。
+
+    有账号密码就自动填上，但**不替你提交**——SDCC 要短信验证码，
+    只能你自己输。程序在旁边轮询，一看到「我的工作台」就存盘退出。
+
+    这条路是给 ``python main.py login`` 用的，人在跟前，所以强制有头浏览器。
+
+    Args:
+        config: services.config.Config 实例。
+        logger: services.logger.RunLogger 实例。
+        password: keyring 里的密码，没有就留空，全靠手输。
+        session_file: 会话保存位置，默认 services.config.session_path()。
+        timeout_ms: 最多等多久，默认 10 分钟。
+
+    Returns:
+        保存好的 session.json 路径。
+
+    Raises:
+        UploadError: 浏览器起不来、超时没等到登录成功、或者存盘失败。
+    """
+    target = _resolve_session_file(session_file)
+    if target is None:
+        raise UploadError("无法确定会话文件的保存位置", ErrorKind.FATAL)
+
+    with sync_playwright() as playwright:
+        # 人在跟前输验证码，必须看得见窗口，这里不看 config.headless
+        browser = _launch_browser(playwright, config, logger, headless=False)
+        # 故意用全新 context：既然是来重新登录的，就该从干净状态开始，
+        # 免得一个半死不活的旧会话把流程带偏。
+        context = browser.new_context(accept_downloads=False)
+        context.set_default_timeout(config.timeout_ms)
+        page = context.new_page()
+
+        try:
+            logger.start("login", "打开 SDCC，等待人工登录")
+            page.goto(config.login_url, wait_until="domcontentloaded")
+            _close_guide_pages(context, logger)
+
+            _prefill_credentials(page, context, config, password, logger)
+            logger.info("login", "请在浏览器里完成登录（含短信验证码），程序会自动检测")
+
+            found = _wait_for_login(context, timeout_ms, logger)
+            if found is None:
+                raise UploadError(
+                    f"{timeout_ms / 60000:.0f} 分钟内没有检测到登录成功，已放弃",
+                    ErrorKind.FATAL,
+                )
+
+            if not _save_storage_state(context, target, logger):
+                raise UploadError("登录成功了，但会话没能写入磁盘", ErrorKind.FATAL)
+
+            logger.success("login", f"会话已保存：{target}")
+            return target
+        finally:
+            try:
+                context.close()
+            finally:
+                browser.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -318,14 +540,6 @@ def _ensure_logged_in(page, config, password: str, logger, report):
 
 
 def _find_import_button(page, config, logger):
-    """找订单管理页上的「导入」按钮，并等到它可见。
-
-    用 SDCC 自己挂的 sdccDropBtn class 定位，不怕改文案；再按「导入」二字过滤，
-    是因为同一行上可能还有别的 sdccDropBtn 按钮（比如导出）。
-
-    这里刻意不等「订单管理」标签页出现——SDCC 的标签栏是自定义组件，没有标准
-    tab 角色，等它只会白白卡满超时。直接等下一步真正要点的东西。
-    """
     button = page.locator(IMPORT_BUTTON_SELECTOR).filter(has_text=re.compile(r"导入")).first
     try:
         button.wait_for(state="visible", timeout=config.timeout_ms)
@@ -339,12 +553,6 @@ def _find_import_button(page, config, logger):
 
 
 def _click_popover_item(page, reference, text: str, logger) -> None:
-    """点击 el-popover 浮层里的菜单项。
-
-    el-popover 的内容不渲染在按钮内部，而是挂到 body 底下的独立节点，
-    通过按钮的 aria-describedby 关联。按这个 id 精确定位，
-    避免点到页面别处同名的元素。
-    """
     popover_id = reference.get_attribute("aria-describedby") or ""
     if not popover_id:
         raise UploadError(
@@ -363,9 +571,18 @@ def _click_popover_item(page, reference, text: str, logger) -> None:
 
 def _open_import_dialog(page, config, logger):
     logger.start("navigate", "进入订单管理")
-    page.get_by_role("button", name=WORKBENCH_BUTTON).first.click()
-    page.get_by_role("menuitem", name=re.compile("订单中心")).locator("div").first.click()
-    page.get_by_text("订单管理", exact=True).first.click()
+
+    workbench = page.get_by_role("button", name=WORKBENCH_BUTTON).first
+    try:
+        workbench.wait_for(state="visible", timeout=WORKBENCH_WAIT_MS)
+        workbench.click()
+        logger.info("navigate", "已点开「我的工作台」")
+    except PlaywrightError:
+        logger.info("navigate", "落地页没有「我的工作台」，直接找订单中心")
+
+    page.locator(".el-submenu__title", has_text="订单中心").first.click()
+    page.get_by_role("menuitem", name="订单管理", exact=True).first.click()
+    
 
     import_button = _find_import_button(page, config, logger)
     logger.success("navigate", "已进入订单管理")
@@ -374,10 +591,7 @@ def _open_import_dialog(page, config, logger):
     import_button.click()
     _click_popover_item(page, import_button, IMPORT_MENU_ITEM, logger)
 
-    # 不按标题文案找弹窗。「导入 - 订单」这几个字里连字符两边到底有没有空格，
-    # 猜错了就是又一次「明明开了却报超时」。改成按内容特征认：
-    # 里面有「请输入关键字选择」输入框的那个 dialog 就是它，
-    # 而这恰好就是下一步要填的东西。
+  
     dialog = page.get_by_role("dialog").filter(
         has=page.get_by_placeholder(PROJECT_PLACEHOLDER)
     ).first
@@ -389,16 +603,6 @@ def _open_import_dialog(page, config, logger):
 
 
 def _find_dropdown_option(page, keyword: str, field_name: str):
-    """在当前展开的下拉浮层里找选项。
-
-    两个关键点：
-
-    1. 从 page 找而不是从 dialog 找——Element UI 把浮层挂在 body 上，不在弹窗里。
-    2. OPTION_SELECTOR 里的 :visible 不能去掉。没展开的浮层也还在 DOM 里，
-       而模板选项「中海壳牌深圳-中海壳牌导入模版」包含项目名「中海壳牌深圳」，
-       has_text 是子串匹配，不先排除隐藏元素的话 .first 会拿到那个隐藏的 li，
-       然后死等一个永远不会可见的东西。
-    """
     options = page.locator(OPTION_SELECTOR)
     hit = options.filter(has_text=keyword).first
     try:
@@ -419,13 +623,7 @@ def _find_dropdown_option(page, keyword: str, field_name: str):
 def _select_option(
     page, dialog, placeholder: str, keyword: str, field_name: str, config, logger
 ) -> None:
-    """展开下拉 → （能输入就）输入关键词 → 点击列表项。
 
-    按 placeholder 而不是按 nth(0)/nth(1) 取控件：项目和模板是两种不同的下拉，
-    placeholder 各不相同，按位置取不但会取不到，顺序一变还会静默填错字段。
-
-    也不用「填完直接回车」，因为下拉是异步加载的，回车经常选不中。
-    """
     logger.start("select", f"选择{field_name}：{keyword}")
 
     box = dialog.get_by_placeholder(placeholder).first
@@ -516,26 +714,16 @@ def upload_file(
     logger=None,
     screenshot_dir: Optional[PathLike] = None,
     progress: ProgressCallback = None,
+    session_file: Optional[PathLike] = None,
 ) -> str:
-    """把一个 Excel 上传到 SDCC，返回上传结果文案。
-
-    Args:
-        file_path: 待上传的 Excel。
-        config: services.config.Config 实例。
-        password: 从 keyring 取出的密码，自动登录必填。
-        logger: services.logger.RunLogger 实例。
-        screenshot_dir: 出错时截图存放目录。
-        progress: 可选回调 ``(step, status, message)``，UI 用来实时显示进度。
-
-    Raises:
-        UploadError: 任何失败都归一成它，带 ErrorKind 供调度器判断重试。
-    """
+   
     path = Path(file_path)
     if not path.exists():
         raise UploadError(f"待上传文件不存在：{path}", ErrorKind.FATAL)
 
     shot_dir = Path(screenshot_dir) if screenshot_dir else None
     run_id = getattr(logger, "run_id", "")
+    state_file = _resolve_session_file(session_file)
 
     def report(step: str, status: str, message: str = "") -> None:
         if progress is None:
@@ -547,7 +735,7 @@ def upload_file(
 
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, config, logger)
-        context = browser.new_context(accept_downloads=False)
+        context = _new_context(browser, config, state_file, logger)
         context.set_default_timeout(config.timeout_ms)
         page = context.new_page()
 
@@ -574,6 +762,13 @@ def upload_file(
             report("upload", "success", result_text)
 
             _close_dialog(dialog, logger)
+
+            # 走到这里说明这套会话是好的，顺手重存一遍。
+            # 如果 SDCC 是滚动续期，这一步能让会话一直不过期；
+            # 就算不是，重存也不会更糟。
+            if getattr(config, "reuse_session", True):
+                _save_storage_state(context, state_file, logger)
+
             return result_text
 
         except UploadError as exc:

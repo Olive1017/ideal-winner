@@ -18,6 +18,9 @@ from typing import List, Optional, Tuple, Union
 APP_NAME = "ShellConvert"
 CONFIG_FILENAME = "config.json"
 
+# Playwright storage_state（登录会话）
+SESSION_FILENAME = "session.json"
+
 # 待上传文件的统一文件名，保证队列里始终只有最新的一份
 UPLOAD_FILENAME = "SDCC导入版.xlsx"
 EXCEL_SUFFIXES = {".xlsx", ".xls"}
@@ -69,6 +72,100 @@ def resource_path(relative: str) -> Path:
     base = getattr(sys, "_MEIPASS", None)
     root = Path(base) if base else Path(__file__).resolve().parent.parent
     return root / relative
+
+
+# --------------------------------------------------------------------------- #
+# 登录会话
+# --------------------------------------------------------------------------- #
+
+
+def session_path() -> Path:
+    """Playwright storage_state 的存放位置。
+
+    文件里是活的登录凭证，**等价于密码**——拿到它就能冒充你操作 TMS。
+    所以放在用户配置目录（不在项目里，不会被误提交到仓库），
+    写入后再用 :func:`harden_file` 收紧权限。
+    """
+    return app_dir() / SESSION_FILENAME
+
+
+def harden_file(path: PathLike) -> None:
+    """把文件权限收成「只有自己能读写」。
+
+    Windows 上 ``os.chmod`` 只能改只读位，做不到真正的 ACL 控制，
+    改不动就静默跳过——它是加固措施，不是功能前提。
+    """
+    try:
+        os.chmod(str(path), 0o600)
+    except OSError:
+        pass
+
+
+def clear_session() -> bool:
+    """删掉已保存的会话，返回是否真的删掉了东西。"""
+    try:
+        session_path().unlink()
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def session_info() -> dict:
+    """读 session.json，汇总出人看得懂的会话状态。
+
+    只读 cookie 的元信息，**不碰 value**——值等同于密码，
+    不应该出现在返回值、日志或界面上。
+
+    注意：这里能算出来的只是**浏览器端**的上限。服务端那条 session
+    记录的真实 TTL 看不到，可能短得多，只能靠实跑发现。
+    """
+    path = session_path()
+    info: dict = {
+        "exists": False,
+        "path": str(path),
+        "saved_at": None,
+        "cookie_count": 0,
+        "session_only": 0,
+        "expires_at": None,
+        "error": "",
+    }
+
+    if not path.exists():
+        return info
+    info["exists"] = True
+
+    try:
+        info["saved_at"] = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        pass
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        info["error"] = f"会话文件读不出来：{exc}"
+        return info
+
+    cookies = data.get("cookies") or []
+    info["cookie_count"] = len(cookies)
+
+    # expires 为 -1 表示会话 cookie（关浏览器即失效）。
+    # 它照样会被存进 storage_state 并在下次灌回去，所以**不影响复用**，
+    # 只是看不到有效期而已。
+    stamps = []
+    for cookie in cookies:
+        expires = cookie.get("expires")
+        if expires is None or expires < 0:
+            info["session_only"] += 1
+        else:
+            stamps.append(expires)
+
+    if stamps:
+        try:
+            info["expires_at"] = datetime.fromtimestamp(max(stamps))
+        except (OSError, OverflowError, ValueError):
+            pass
+
+    return info
 
 
 # --------------------------------------------------------------------------- #
@@ -140,9 +237,11 @@ class Config:
     project: str = DEFAULT_PROJECT
     template: str = DEFAULT_TEMPLATE
 
+    reuse_session: bool = True
+
     # 自动上传
     auto_upload_enabled: bool = False
-    schedule_time: str = "09:30"  # HH:MM，24 小时制
+    schedule_time: str = "18:30"  # HH:MM，24 小时制
     retry_delays_minutes: List[int] = field(default_factory=lambda: [5, 15, 30])
 
     # 浏览器

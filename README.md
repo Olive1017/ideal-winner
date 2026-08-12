@@ -165,3 +165,4 @@ pyinstaller main.py --noconsole --onefile --name ShellConvert \
 - 仅 Windows（开机自启、凭据管理器）；其他平台可跑命令行但这两个功能失效
 - 无自动更新，换版本需重新发 exe
 - SDCC 页面改版可能导致选择器失效，看日志截图定位后改 `core/uploader.py`
+

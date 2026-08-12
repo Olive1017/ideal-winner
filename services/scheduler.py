@@ -5,9 +5,10 @@
 
 重试策略：
 - 可重试错误（超时、元素没出现、服务端抽风）→ 5 / 15 / 30 分钟退避，最多 3 次；
-- 不可重试错误（密码错、模板名错、业务校验不通过）→ 立即失败并归档，等人工处理。
+- 不可重试错误（密码错、模板名错、业务校验不通过、会话过期需要验证码）
+  → 立即失败并归档，等人工处理。
 
-可重试失败时文件留在 pending/ 不归档，下次重试才能拿得到。
+可重试失败时文件留在 pending/ 不归档，下次重试才拿得到。
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from core.models import ErrorKind, UploadError, UploadResult, UploadStatus
 from core.uploader import upload_file
 
 from . import credentials
-from .config import Config, archive_pending, latest_pending, log_dir
+from .config import Config, archive_pending, latest_pending, log_dir, session_path
 from .logger import RunLogger, new_run_id
 from .single_instance import upload_lock
 
@@ -76,20 +77,27 @@ def run_upload_once(
         )
 
     try:
-        password = credentials.get_password(config.username)
-        if not config.username or not password:
+        password = credentials.get_password(config.username) if config.username else ""
+
+        # 有可复用的会话时，账号密码**不是必需品**：session.json 本身就是登录凭证。
+        # 只有两者都没有，才真的无路可走。
+        has_session = bool(getattr(config, "reuse_session", True)) and session_path().exists()
+        if not has_session and not (config.username and password):
             raise UploadError(
-                "尚未配置 SDCC 账号或密码，请先到「设置」里填写", ErrorKind.FATAL
+                "既没有可复用的会话，也没有保存账号密码。"
+                "请先到「设置」里填写，或跑一次 python main.py login",
+                ErrorKind.FATAL,
             )
 
         report("run", "start", f"开始上传：{target.name}（第 {attempt} 次尝试）")
         message = upload_file(
             file_path=target,
             config=config,
-            password=password,
+            password=password or "",
             logger=logger,
             screenshot_dir=log_dir(),
             progress=progress,
+            session_file=session_path(),
         )
 
         archived = archive_pending(target, success=True)

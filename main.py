@@ -1,28 +1,22 @@
-"""程序入口。
-
-不带参数直接双击 / 运行 → 启动图形界面。
-
-命令行模式主要用于排查问题和无人值守执行：
-
-    python main.py                                        # 启动界面
-    python main.py ui --minimized                         # 启动后直接进托盘（开机自启用的就是这个）
-    python main.py convert 订单.xlsx -c 车型.xlsx        # 转换并放进待上传队列
-    python main.py upload                                 # 立即上传队列里最新的文件
-    python main.py config --username 13100000000          # 修改配置
-    python main.py password                               # 交互式录入密码（存入凭据管理器）
-"""
-
 from __future__ import annotations
 
 import argparse
 import getpass
 import sys
+from datetime import datetime
 
 from core.converter import convert, export
-from core.models import ConvertError, UploadStatus
+from core.models import ConvertError, UploadError, UploadStatus
+from core.uploader import MANUAL_LOGIN_TIMEOUT_MS, save_session
 from services import credentials
-from services.config import UPLOAD_FILENAME, Config, pending_dir
-from services.logger import setup
+from services.config import (
+    UPLOAD_FILENAME,
+    Config,
+    clear_session,
+    pending_dir,
+    session_info,
+)
+from services.logger import RunLogger, setup
 from services.scheduler import run_upload_once
 from services.single_instance import ensure_single_instance
 
@@ -72,6 +66,78 @@ def cmd_upload(args: argparse.Namespace) -> int:
     return 0 if result.status is not UploadStatus.FAILED else 1
 
 
+def cmd_login(args: argparse.Namespace) -> int:
+    """人工登录一次，把会话存下来给定时任务复用。
+
+    验证码只能人输，这一步没法自动化；但跑一次能顶很久。
+    """
+    config = Config.load()
+    password = credentials.get_password(config.username) if config.username else ""
+
+    if not config.username:
+        print("还没设置账号，等下请在浏览器里手动输入。")
+        print("想让程序自动填：python main.py config --username 你的账号")
+    elif not password:
+        print(f"账号 {config.username} 还没保存密码，等下请手动输入。")
+        print("想让程序自动填：python main.py password")
+
+    print()
+    print("接下来会打开一个浏览器窗口：")
+    print("  1. 程序自动填账号和密码（如果已保存）")
+    print("  2. 你手动输短信验证码并提交")
+    print("  3. 程序检测到「我的工作台」后自动保存会话")
+    print(f"  最多等 {MANUAL_LOGIN_TIMEOUT_MS // 60000} 分钟，中途想放弃直接关窗口就行")
+    print()
+
+    try:
+        target = save_session(config, RunLogger(), password=password or "")
+    except UploadError as exc:
+        print(f"\n登录失败：{exc.message}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 - 命令行下打印一行比抛栈有用
+        print(f"\n登录出错：{exc}")
+        return 1
+
+    print(f"\n会话已保存：{target}\n")
+    return cmd_session(args)
+
+
+def cmd_session(args: argparse.Namespace) -> int:
+    """查看或清除已保存的会话。"""
+    # cmd_login 会直接复用本函数，那个 namespace 上没有 clear，所以用 getattr
+    if getattr(args, "clear", False):
+        print("已删除保存的会话" if clear_session() else "本来就没有保存过会话")
+        return 0
+
+    info = session_info()
+    if not info["exists"]:
+        print("还没有保存过会话。跑一次：python main.py login")
+        return 1
+    if info["error"]:
+        print(info["error"])
+        return 1
+
+    print(f"会话文件：{info['path']}")
+    if info["saved_at"]:
+        print(f"保存时间：{info['saved_at']:%Y-%m-%d %H:%M}")
+    print(f"Cookie：共 {info['cookie_count']} 条，其中 {info['session_only']} 条没有过期时间")
+
+    expires_at = info["expires_at"]
+    if expires_at is None:
+        print("有效期：全是会话 cookie，看不到过期时间（不影响复用）")
+    else:
+        left = expires_at - datetime.now()
+        if left.total_seconds() <= 0:
+            print(f"有效期：已于 {expires_at:%Y-%m-%d %H:%M} 过期，建议重新 login")
+        else:
+            print(f"有效期：最长到 {expires_at:%Y-%m-%d %H:%M}（还剩 {left.days} 天）")
+
+    print()
+    print("提示：上面只是浏览器端的上限。服务端可能提前失效，")
+    print("      真到那一天自动上传会报错并提示重新 login。")
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     config = Config.load()
     changed = False
@@ -86,6 +152,9 @@ def cmd_config(args: argparse.Namespace) -> int:
     if args.auto is not None:
         config.auto_upload_enabled = args.auto
         changed = True
+    if args.reuse_session is not None:
+        config.reuse_session = args.reuse_session
+        changed = True
     if changed:
         config.save()
         print(f"已保存：{Config.path()}")
@@ -95,6 +164,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     print(f"模板：{config.template}")
     print(f"每日上传时间：{config.schedule_time}（自动上传：{'开' if config.auto_upload_enabled else '关'}）")
     print(f"密码：{'已保存' if credentials.has_password(config.username) else '未保存'}")
+    print(f"会话复用：{'开' if config.reuse_session else '关'}（详情：python main.py session）")
     return 0
 
 
@@ -137,6 +207,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_upload.add_argument("-f", "--file", default=None, help="指定文件，默认取队列里最新的")
     p_upload.set_defaults(func=cmd_upload)
 
+    p_login = sub.add_parser("login", help="人工登录一次并保存会话（供定时任务复用）")
+    p_login.set_defaults(func=cmd_login)
+
+    p_session = sub.add_parser("session", help="查看已保存的会话状态")
+    p_session.add_argument("--clear", action="store_true", help="删除已保存的会话")
+    p_session.set_defaults(func=cmd_session)
+
     p_config = sub.add_parser("config", help="查看或修改配置")
     p_config.add_argument("--username")
     p_config.add_argument("--project")
@@ -147,6 +224,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_config.add_argument("--no-headless", dest="headless", action="store_false")
     p_config.add_argument("--auto", dest="auto", action="store_true", default=None, help="开启自动上传")
     p_config.add_argument("--no-auto", dest="auto", action="store_false")
+    p_config.add_argument(
+        "--reuse-session",
+        dest="reuse_session",
+        action="store_true",
+        default=None,
+        help="开启会话复用（默认就是开的）",
+    )
+    p_config.add_argument("--no-reuse-session", dest="reuse_session", action="store_false")
     p_config.set_defaults(func=cmd_config)
 
     p_password = sub.add_parser("password", help="录入 SDCC 密码")

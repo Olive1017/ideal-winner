@@ -44,8 +44,14 @@ def run_upload_once(
     attempt: int = 1,
     file_path: Optional[PathLike] = None,
     progress: ProgressCallback = None,
+    interactive: bool = False,
 ) -> UploadResult:
-    """执行一次上传。不抛异常，所有结果都包成 UploadResult 返回。"""
+    """执行一次上传。不抛异常，所有结果都包成 UploadResult 返回。
+
+    interactive=True 表示是人在屏幕前手动触发的：没有可用会话、或账号密码
+    被验证码拦住时，允许弹有头浏览器转人工登录。定时任务保持 False，
+    缺会话直接报错，不弹窗干等。
+    """
     config = config or Config.load()
     logger = RunLogger(run_id or new_run_id())
     started = time.monotonic()
@@ -81,8 +87,9 @@ def run_upload_once(
 
         # 有可复用的会话时，账号密码**不是必需品**：session.json 本身就是登录凭证。
         # 只有两者都没有，才真的无路可走。
+        # 交互模式（人在屏幕前）不提前拦：没凭据可以到上传流程里转人工登录。
         has_session = bool(getattr(config, "reuse_session", True)) and session_path().exists()
-        if not has_session and not (config.username and password):
+        if not interactive and not has_session and not (config.username and password):
             raise UploadError(
                 "既没有可复用的会话，也没有保存账号密码。"
                 "请先到「设置」里填写，或跑一次 python main.py login",
@@ -98,6 +105,7 @@ def run_upload_once(
             screenshot_dir=log_dir(),
             progress=progress,
             session_file=session_path(),
+            interactive=interactive,
         )
 
         archived = archive_pending(target, success=True)
@@ -217,9 +225,16 @@ class UploadScheduler:
     # ---- 执行 ----
 
     def run_now(self, file_path: Optional[PathLike] = None) -> UploadResult:
-        """手动触发，同步执行（UI 侧放到子线程里调）。"""
+        """手动触发，同步执行（UI 侧放到子线程里调）。
+
+        人在屏幕前，允许转人工登录（弹有头浏览器输验证码）。
+        """
         result = run_upload_once(
-            self.config, attempt=1, file_path=file_path, progress=self.progress
+            self.config,
+            attempt=1,
+            file_path=file_path,
+            progress=self.progress,
+            interactive=True,
         )
         self._notify(result)
         return result
@@ -229,6 +244,7 @@ class UploadScheduler:
         self._execute(attempt=1)
 
     def _execute(self, attempt: int) -> None:
+        # 定时任务不传 interactive：没人值守时缺会话直接报错，不弹窗干等
         result = run_upload_once(self.config, attempt=attempt, progress=self.progress)
 
         if result.status is UploadStatus.FAILED and result.retryable:

@@ -53,7 +53,9 @@ class UploadWorker(QThread):
         def progress(step: str, status: str, message: str) -> None:
             self.progressed.emit(step, status, message)
 
+        # 人从界面/托盘点的「立即上传」，interactive=True：
+        # 没有可用会话时允许弹有头浏览器转人工登录，登完接着传
         result = run_upload_once(
-            self.config, file_path=self.file_path, progress=progress
+            self.config, file_path=self.file_path, progress=progress, interactive=True
         )
         self.finishedResult.emit(result)

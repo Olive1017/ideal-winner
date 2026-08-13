@@ -389,14 +389,13 @@ def _auto_login(page, context, config, password: str, logger):
         raise UploadError(
             f"自动登录失败：{detail}。"
             "如果是验证码，说明这台机器的设备信任已过期，"
-            "跑一次 python main.py login 人工登录并保存会话即可",
+            "手动触发一次上传（或 python main.py login）即可转人工登录",
             ErrorKind.FATAL,
         )
     raise UploadError(f"自动登录失败：{detail}", ErrorKind.RETRYABLE)
 
 
 def _need_login(page, timeout_ms: int, logger):
-    
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
         _close_guide_pages(page.context, logger)
@@ -405,14 +404,32 @@ def _need_login(page, timeout_ms: int, logger):
                 return True
         except PlaywrightError:
             pass
+        try:
+            if page.locator(".el-submenu__title", has_text="订单中心").first.is_visible():
+                return False
+        except PlaywrightError:
+            pass
         time.sleep(PAGE_SCAN_INTERVAL_SEC)
     return False
 
 
-def _ensure_logged_in(page, config, password: str, logger, report):
+def _ensure_logged_in(
+    page,
+    config,
+    password: str,
+    logger,
+    report,
+    playwright,
+    session_file: Optional[Path],
+    interactive: bool = False,
+):
     """保证进入登录态，返回后续操作应该使用的标签页。
 
-    返回值很重要：登录完成后工作台不一定还在我们最初打开的那个标签页上。
+    返回值很重要：登录完成后工作台不一定还在我们最初打开的那个标签页上；
+    走了人工登录兜底时连 context 都是新建的，旧 page 已失效，必须用返回值。
+
+    interactive=True（手动触发的上传）时，账号密码过不了验证码会弹有头
+    浏览器转人工登录；interactive=False（定时任务）维持原样，缺会话直接报错。
     """
     context = page.context
 
@@ -420,9 +437,9 @@ def _ensure_logged_in(page, config, password: str, logger, report):
     page.goto(config.login_url, wait_until="domcontentloaded")
     _close_guide_pages(context, logger)
 
-    # 第一级：判据是落地页有没有「登录」按钮。会话有效时（本例）直接就是
-    # 登录后的样子、没有「登录」按钮；会话无效时 .../manage/ 会给一个「登录」按钮。
-    # 不再依赖「我的工作台」——那是账号密码登录后才有、会话恢复的落地页上根本没有。
+    # 第一级：判据见 _need_login——看到「订单中心」菜单才算已登录，
+    # 看到「登录」按钮则是会话无效。不依赖「我的工作台」：那是账号密码
+    # 登录后才有、会话恢复的落地页上根本没有。
     if not _need_login(page, LOGIN_STATE_PROBE_MS, logger):
         logger.success("login", "会话有效，跳过登录")
         report("login", "success", "会话有效，跳过登录")
@@ -430,9 +447,72 @@ def _ensure_logged_in(page, config, password: str, logger, report):
 
     # 第二级：会话过期了，但浏览器里的设备信任标记通常命更长，
     # 这时候账号密码往往能直接进，服务器不会再发短信。
-    logger.info("login", "会话无效或不存在，改用账号密码登录")
-    report("login", "start", "会话已失效，正在用账号密码登录")
-    return _auto_login(page, context, config, password, logger)
+    if config.username and password:
+        logger.info("login", "会话无效或不存在，改用账号密码登录")
+        report("login", "start", "会话已失效，正在用账号密码登录")
+        try:
+            return _auto_login(page, context, config, password, logger)
+        except UploadError as exc:
+            # 可重试错误（登录页没加载出来等）转人工也解决不了，照旧抛出；
+            # 非交互模式（定时任务）维持原样，缺会话/要验证码直接失败。
+            if exc.retryable or not interactive:
+                raise
+            logger.info("login", f"自动登录需要人工处理：{exc.message}")
+    elif not interactive:
+        # 没凭据又不能弹窗（定时任务），沿用 _auto_login 里的报错文案
+        return _auto_login(page, context, config, password, logger)
+
+    # 第三级：验证码只能人输。interactive（手动触发的上传）时弹有头浏览器
+    # 让人登录一次，存好会话后换带新会话的 context 接着跑本次上传。
+    return _manual_login_then_continue(
+        page, config, password, logger, report, playwright, session_file
+    )
+
+
+def _manual_login_then_continue(
+    page,
+    config,
+    password: str,
+    logger,
+    report,
+    playwright,
+    session_file: Optional[Path],
+):
+    """人工登录兜底：弹有头浏览器让人输验证码，存好会话后换 context 继续上传。
+
+    返回新 context 里已登录的标签页；原 context 会被关闭，调用方不要再碰旧 page。
+    """
+    target = _resolve_session_file(session_file)
+    if target is None:
+        raise UploadError("无法确定会话文件的保存位置", ErrorKind.FATAL)
+
+    report("login", "info", "需要人工登录：请在弹出的浏览器里完成登录（含短信验证码）")
+    _manual_login_and_save(
+        playwright, config, logger, password, target, MANUAL_LOGIN_TIMEOUT_MS
+    )
+
+    # 旧 context 里的会话已失效，用刚存的会话换新 context 接着跑
+    old_context = page.context
+    browser = old_context.browser
+    new_context = browser.new_context(accept_downloads=False, storage_state=str(target))
+    new_context.set_default_timeout(config.timeout_ms)
+    try:
+        old_context.close()
+    except PlaywrightError:
+        pass
+
+    report("login", "start", "登录成功，正在用新会话恢复上传")
+    new_page = new_context.new_page()
+    new_page.goto(config.login_url, wait_until="domcontentloaded")
+    _close_guide_pages(new_context, logger)
+
+    if _need_login(new_page, LOGIN_STATE_PROBE_MS, logger):
+        # 刚存的会话按理不会失效；真失效也不再循环转人工，免得死循环
+        raise UploadError("人工登录后会话仍未生效，请重试", ErrorKind.RETRYABLE)
+
+    logger.success("login", "人工登录完成，继续上传")
+    report("login", "success", "人工登录完成，继续上传")
+    return new_page
 
 
 def _prefill_credentials(page, context, config, password: str, logger) -> None:
@@ -467,6 +547,55 @@ def _prefill_credentials(page, context, config, password: str, logger) -> None:
         logger.warn("login", f"自动填账号密码失败，请手动输入：{exc}")
 
 
+def _manual_login_and_save(
+    playwright,
+    config,
+    logger,
+    password: str,
+    target: Path,
+    timeout_ms: int,
+) -> Path:
+    """弹有头浏览器让人工登录，检测到「我的工作台」后把会话写进 target。
+
+    ``save_session``（python main.py login）和上传流程里的验证码兜底
+    （``_manual_login_then_continue``）共用这一段。它总是起**独立的**
+    有头浏览器和全新 context，登完整个关掉——所以即使上传那边配了
+    headless，人工登录也照样有窗口给人操作。
+    """
+    browser = _launch_browser(playwright, config, logger, headless=False)
+    # 故意用全新 context：既然是来重新登录的，就该从干净状态开始，
+    # 免得一个半死不活的旧会话把流程带偏。
+    context = browser.new_context(accept_downloads=False)
+    context.set_default_timeout(config.timeout_ms)
+    page = context.new_page()
+
+    try:
+        logger.start("login", "打开 SDCC，等待人工登录")
+        page.goto(config.login_url, wait_until="domcontentloaded")
+        _close_guide_pages(context, logger)
+
+        _prefill_credentials(page, context, config, password, logger)
+        logger.info("login", "请在浏览器里完成登录（含短信验证码），程序会自动检测")
+
+        found = _wait_for_login(context, timeout_ms, logger)
+        if found is None:
+            raise UploadError(
+                f"{timeout_ms / 60000:.0f} 分钟内没有检测到登录成功，已放弃",
+                ErrorKind.FATAL,
+            )
+
+        if not _save_storage_state(context, target, logger):
+            raise UploadError("登录成功了，但会话没能写入磁盘", ErrorKind.FATAL)
+
+        logger.success("login", f"会话已保存：{target}")
+        return target
+    finally:
+        try:
+            context.close()
+        finally:
+            browser.close()
+
+
 def save_session(
     config,
     logger,
@@ -480,6 +609,7 @@ def save_session(
     只能你自己输。程序在旁边轮询，一看到「我的工作台」就存盘退出。
 
     这条路是给 ``python main.py login`` 用的，人在跟前，所以强制有头浏览器。
+    上传流程里的验证码兜底走的是同一段逻辑（``_manual_login_and_save``）。
 
     Args:
         config: services.config.Config 实例。
@@ -499,39 +629,9 @@ def save_session(
         raise UploadError("无法确定会话文件的保存位置", ErrorKind.FATAL)
 
     with sync_playwright() as playwright:
-        # 人在跟前输验证码，必须看得见窗口，这里不看 config.headless
-        browser = _launch_browser(playwright, config, logger, headless=False)
-        # 故意用全新 context：既然是来重新登录的，就该从干净状态开始，
-        # 免得一个半死不活的旧会话把流程带偏。
-        context = browser.new_context(accept_downloads=False)
-        context.set_default_timeout(config.timeout_ms)
-        page = context.new_page()
-
-        try:
-            logger.start("login", "打开 SDCC，等待人工登录")
-            page.goto(config.login_url, wait_until="domcontentloaded")
-            _close_guide_pages(context, logger)
-
-            _prefill_credentials(page, context, config, password, logger)
-            logger.info("login", "请在浏览器里完成登录（含短信验证码），程序会自动检测")
-
-            found = _wait_for_login(context, timeout_ms, logger)
-            if found is None:
-                raise UploadError(
-                    f"{timeout_ms / 60000:.0f} 分钟内没有检测到登录成功，已放弃",
-                    ErrorKind.FATAL,
-                )
-
-            if not _save_storage_state(context, target, logger):
-                raise UploadError("登录成功了，但会话没能写入磁盘", ErrorKind.FATAL)
-
-            logger.success("login", f"会话已保存：{target}")
-            return target
-        finally:
-            try:
-                context.close()
-            finally:
-                browser.close()
+        return _manual_login_and_save(
+            playwright, config, logger, password, target, timeout_ms
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -582,7 +682,7 @@ def _open_import_dialog(page, config, logger):
 
     page.locator(".el-submenu__title", has_text="订单中心").first.click()
     page.get_by_role("menuitem", name="订单管理", exact=True).first.click()
-    
+
 
     import_button = _find_import_button(page, config, logger)
     logger.success("navigate", "已进入订单管理")
@@ -591,7 +691,7 @@ def _open_import_dialog(page, config, logger):
     import_button.click()
     _click_popover_item(page, import_button, IMPORT_MENU_ITEM, logger)
 
-  
+
     dialog = page.get_by_role("dialog").filter(
         has=page.get_by_placeholder(PROJECT_PLACEHOLDER)
     ).first
@@ -715,8 +815,14 @@ def upload_file(
     screenshot_dir: Optional[PathLike] = None,
     progress: ProgressCallback = None,
     session_file: Optional[PathLike] = None,
+    interactive: bool = False,
 ) -> str:
-   
+    """上传一个文件到 SDCC，返回结果文案。
+
+    interactive=True 表示是人在屏幕前手动触发的：没有可用会话、或账号密码
+    被验证码拦住时，弹有头浏览器转人工登录，登完接着跑本次上传。
+    定时任务保持 False，缺会话直接报错，不弹窗干等。
+    """
     path = Path(file_path)
     if not path.exists():
         raise UploadError(f"待上传文件不存在：{path}", ErrorKind.FATAL)
@@ -741,11 +847,42 @@ def upload_file(
 
         try:
             report("login", "start", "正在打开 SDCC")
-            # 注意要接住返回值：登录后工作台可能在另一个标签页上
-            page = _ensure_logged_in(page, config, password, logger, report)
+            # 注意要接住返回值：登录后工作台可能在另一个标签页上；
+            # 走了人工登录兜底时连 context 都是新建的，旧 page 已失效
+            page = _ensure_logged_in(
+                page,
+                config,
+                password,
+                logger,
+                report,
+                playwright,
+                state_file,
+                interactive=interactive,
+            )
 
             report("navigate", "start", "正在进入订单管理")
-            dialog = _open_import_dialog(page, config, logger)
+            try:
+                dialog = _open_import_dialog(page, config, logger)
+            except PlaywrightError:
+                # 导航途中可能被踢回登录页：同一账号在别处登录会把服务端会话
+                # 顶掉，前端异步校验 401 后跳走，这时点菜单必然超时。确认一下——
+                # 真被踢了就重走登录流程（含人工兜底），登完重试一次导航；
+                # 不是登录问题就照原样抛出。
+                if not _need_login(page, LOGIN_STATE_PROBE_MS, logger):
+                    raise
+                logger.info("login", "导航途中被踢回登录页，重新登录")
+                report("login", "start", "会话被踢下线，正在重新登录")
+                page = _ensure_logged_in(
+                    page,
+                    config,
+                    password,
+                    logger,
+                    report,
+                    playwright,
+                    state_file,
+                    interactive=interactive,
+                )
+                dialog = _open_import_dialog(page, config, logger)
             report("navigate", "success", "导入弹窗已打开")
 
             report("select", "start", "正在选择项目和模板")
@@ -766,8 +903,9 @@ def upload_file(
             # 走到这里说明这套会话是好的，顺手重存一遍。
             # 如果 SDCC 是滚动续期，这一步能让会话一直不过期；
             # 就算不是，重存也不会更糟。
+            # 用 page.context 而不是开头的 context：人工登录兜底会把它换掉。
             if getattr(config, "reuse_session", True):
-                _save_storage_state(context, state_file, logger)
+                _save_storage_state(page.context, state_file, logger)
 
             return result_text
 
@@ -787,5 +925,7 @@ def upload_file(
         finally:
             try:
                 context.close()
+            except PlaywrightError:
+                pass  # 人工登录兜底时旧 context 已经被关掉了
             finally:
                 browser.close()

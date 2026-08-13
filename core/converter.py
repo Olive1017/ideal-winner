@@ -1,17 +1,3 @@
-"""壳牌订单 Excel → SDCC 导入格式。
-
-设计约定：
-- ``convert()`` 只负责计算，返回内存里的 DataFrame，不写任何文件；
-- ``export()`` 单独负责落盘。
-
-这样 UI 可以「先转换再预览，确认后才导出」，定时任务则直接复用同一套逻辑。
-
-相对旧版 convert.py 修复的问题：
-1. 车型映射两侧清洗规则不一致，导致匹配失败后静默填「未知」；
-2. convert() 返回值长度随参数变化，output_file=None 时调用方直接解包报错；
-3. 日期解析失败产生 NaT，被 strftime 变成字面量 "NaT" 写进上传文件。
-"""
-
 from __future__ import annotations
 
 import re

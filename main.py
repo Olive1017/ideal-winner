@@ -59,7 +59,9 @@ def cmd_upload(args: argparse.Namespace) -> int:
     def progress(step: str, status: str, message: str) -> None:
         print(f"  [{step}/{status}] {message}")
 
-    result = run_upload_once(file_path=args.file, progress=progress)
+    # 命令行手动跑也是人在跟前，interactive=True：
+    # 没有可用会话时允许弹有头浏览器转人工登录，登完接着传
+    result = run_upload_once(file_path=args.file, progress=progress, interactive=True)
     print(f"\n{result.status.value}: {result.message}")
     if result.detail:
         print(f"详情：{result.detail}")

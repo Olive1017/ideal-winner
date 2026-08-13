@@ -1,10 +1,3 @@
-"""JSONL 结构化日志。
-
-每行一个 JSON，字段固定为 ts / run_id / level / step / status / msg / extra。
-UI 的日志页按 run_id 分组渲染成时间线；将来要把日志搬到网页前端展示，
-格式不用改，直接按行 parse 即可。
-"""
-
 from __future__ import annotations
 
 import json

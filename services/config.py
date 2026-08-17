@@ -1,9 +1,3 @@
-"""应用配置与数据目录。
-
-配置和数据一律放在 ``%APPDATA%/ShellConvert/``，不放程序目录——
-打包成 exe 之后程序目录可能只读，而且换版本时会被整个覆盖掉。
-"""
-
 from __future__ import annotations
 
 import json
@@ -84,21 +78,9 @@ def session_path() -> Path:
 
     文件里是活的登录凭证，**等价于密码**——拿到它就能冒充你操作 TMS。
     所以放在用户配置目录（不在项目里，不会被误提交到仓库），
-    写入后再用 :func:`harden_file` 收紧权限。
+    写入后再收紧权限。
     """
     return app_dir() / SESSION_FILENAME
-
-
-def harden_file(path: PathLike) -> None:
-    """把文件权限收成「只有自己能读写」。
-
-    Windows 上 ``os.chmod`` 只能改只读位，做不到真正的 ACL 控制，
-    改不动就静默跳过——它是加固措施，不是功能前提。
-    """
-    try:
-        os.chmod(str(path), 0o600)
-    except OSError:
-        pass
 
 
 def clear_session() -> bool:
@@ -262,22 +244,26 @@ class Config:
     def load(cls) -> "Config":
         path = cls.path()
         if not path.exists():
-            config = cls()
-            config.save()
-            return config
+            # 不落盘：默认值留在代码里。文件里只会有用户真正改过的覆盖项，
+            # 以后改代码里的 DEFAULT_*，所有机器下次启动自动用新值。
+            return cls()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             # 配置坏了不能让程序起不来，退回默认值
             return cls()
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        overrides = {k: v for k, v in raw.items() if k in known}
+        return cls(**overrides)
 
     def save(self) -> None:
+        # 只写「和默认值不同」的覆盖项；值改回默认的字段会自动从文件里消失
+        defaults = asdict(Config())
+        overrides = {k: v for k, v in asdict(self).items() if v != defaults[k]}
         path = self.path()
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(overrides, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         tmp.replace(path)
 

@@ -68,6 +68,15 @@ LOGIN_STATE_PROBE_MS = 8_000
 # 等这么久还没出现就当它不存在，直接跳到订单中心，不作为硬前置。
 WORKBENCH_WAIT_MS = 3_000
 
+# 导航菜单点击的超时。故意不用 config.timeout_ms（默认 100 秒）：
+# 被踢回登录页时点菜单必然超时，短一点才能快点进「重新登录再试」的自愈分支。
+NAV_MENU_TIMEOUT_MS = 10_000
+
+# 进登录流程后，先花多久快速扫一遍「登录 iframe 是不是已经在页面上」。
+# 会话失效时 SDCC 常直接把人送到 IAM 登录页，这时没有「登录」按钮可点；
+# 反过来先点按钮会白等一个点击超时（日志里见过 30 秒），所以先快速扫。
+LOGIN_PAGE_QUICK_SCAN_MS = 2_000
+
 # 人工登录（python main.py login）最多等多久，以及等待期间多久播报一次
 MANUAL_LOGIN_TIMEOUT_MS = 600_000
 LOGIN_HEARTBEAT_SEC = 30.0
@@ -93,13 +102,7 @@ def _capture_screenshot(page, screenshot_dir: Optional[Path], run_id: str) -> Op
 
 
 def _launch_browser(playwright, config, logger, headless: Optional[bool] = None):
-    """优先 Chrome，起不来就降级 Edge，都没有才报错。
-
-    不打包 Chromium，是为了把分发给同事的 exe 控制在合理体积。
-
-    ``headless`` 传 None 表示按配置走；人工登录那条路必须看得见窗口，
-    会显式传 False 把配置盖掉。
-    """
+  
     channels = list(config.browser_channels or ["chrome"])
     want_headless = bool(config.headless) if headless is None else bool(headless)
     last_error: Optional[Exception] = None
@@ -327,17 +330,23 @@ def _save_storage_state(context, session_file: Optional[Path], logger) -> bool:
 
 
 def _open_login_page(page, context, config, logger):
-    """点首页的「登录」，把真正的登录页找出来并置前。
+    """把真正的登录页找出来并置前。
 
     自动登录和人工登录共用。找不到就返回 None，由调用方决定是报错还是让人接手。
     """
-    # exact=True 很重要：页面上还有「登录说明」「退出登录」这类文案，
-    # 默认的子串匹配会把它们一起命中。
-    page.get_by_role("button", name="登录", exact=True).first.click()
-
-    # 点「登录」之后，IAM 会额外弹一个「登录说明」页，跟登录页的先后顺序不固定。
-    # 所以按「有没有登录 iframe」来认页面，而不是用 expect_popup 拿第一个弹窗。
-    login_page = _find_login_page(context, config.timeout_ms)
+    # 先快速扫一遍登录 iframe：会话失效时页面可能直接就是 IAM 登录页，
+    # iframe 已经在 DOM 里，这时去点「登录」按钮只会白等一个点击超时。
+    login_page = _find_login_page(context, LOGIN_PAGE_QUICK_SCAN_MS)
+    if login_page is None:
+        # exact=True 很重要：页面上还有「登录说明」「退出登录」这类文案，
+        # 默认的子串匹配会把它们一起命中。
+        try:
+            page.get_by_role("button", name="登录", exact=True).first.click()
+        except PlaywrightError:
+            logger.info("login", "首页没有「登录」按钮，继续在现有标签页里找登录页")
+        # 点「登录」之后，IAM 会额外弹一个「登录说明」页，跟登录页的先后顺序不固定。
+        # 所以按「有没有登录 iframe」来认页面，而不是用 expect_popup 拿第一个弹窗。
+        login_page = _find_login_page(context, config.timeout_ms)
     _close_guide_pages(context, logger)
 
     if login_page is None or login_page.is_closed():
@@ -396,6 +405,7 @@ def _auto_login(page, context, config, password: str, logger):
 
 
 def _need_login(page, timeout_ms: int, logger):
+
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
         _close_guide_pages(page.context, logger)
@@ -404,13 +414,14 @@ def _need_login(page, timeout_ms: int, logger):
                 return True
         except PlaywrightError:
             pass
-        try:
-            if page.locator(".el-submenu__title", has_text="订单中心").first.is_visible():
-                return False
-        except PlaywrightError:
-            pass
         time.sleep(PAGE_SCAN_INTERVAL_SEC)
-    return False
+
+    # 窗口等满，此刻的状态才可信：菜单在才算已登录；
+    # 不在（含页面直接跳去 IAM 登录页、两个信号都没有）一律按需要登录处理
+    try:
+        return not page.locator(".el-submenu__title", has_text="订单中心").first.is_visible()
+    except PlaywrightError:
+        return True
 
 
 def _ensure_logged_in(
@@ -423,14 +434,7 @@ def _ensure_logged_in(
     session_file: Optional[Path],
     interactive: bool = False,
 ):
-    """保证进入登录态，返回后续操作应该使用的标签页。
-
-    返回值很重要：登录完成后工作台不一定还在我们最初打开的那个标签页上；
-    走了人工登录兜底时连 context 都是新建的，旧 page 已失效，必须用返回值。
-
-    interactive=True（手动触发的上传）时，账号密码过不了验证码会弹有头
-    浏览器转人工登录；interactive=False（定时任务）维持原样，缺会话直接报错。
-    """
+   
     context = page.context
 
     logger.start("login", "打开 SDCC")
@@ -680,8 +684,12 @@ def _open_import_dialog(page, config, logger):
     except PlaywrightError:
         logger.info("navigate", "落地页没有「我的工作台」，直接找订单中心")
 
-    page.locator(".el-submenu__title", has_text="订单中心").first.click()
-    page.get_by_role("menuitem", name="订单管理", exact=True).first.click()
+    page.locator(".el-submenu__title", has_text="订单中心").first.click(
+        timeout=NAV_MENU_TIMEOUT_MS
+    )
+    page.get_by_role("menuitem", name="订单管理", exact=True).first.click(
+        timeout=NAV_MENU_TIMEOUT_MS
+    )
 
 
     import_button = _find_import_button(page, config, logger)

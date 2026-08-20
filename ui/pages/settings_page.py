@@ -1,4 +1,4 @@
-"""设置页：账号密码、项目模板、浏览器与开机自启。
+"""设置页：账号密码、壳牌导出、项目模板、浏览器与开机自启。
 
 密码不进配置文件，只进 Windows 凭据管理器；输入框里也不回显原密码，
 只用一个「已保存」状态提示。
@@ -7,7 +7,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -25,6 +31,8 @@ from qfluentwidgets import (
 
 from services import autostart, credentials
 from services.config import Config
+
+EXCEL_FILTER = "Excel 文件 (*.xlsx *.xls)"
 
 
 class SettingsPage(QWidget):
@@ -48,6 +56,7 @@ class SettingsPage(QWidget):
 
         layout.addWidget(SubtitleLabel("设置", self))
         layout.addWidget(self._build_account_card())
+        layout.addWidget(self._build_shell_card())
         layout.addWidget(self._build_import_card())
         layout.addWidget(self._build_advanced_card())
 
@@ -76,6 +85,7 @@ class SettingsPage(QWidget):
 
         self.username_edit = LineEdit(card)
         self.username_edit.setPlaceholderText("用户编号 / 手机号 / 邮箱")
+        self.username_edit.editingFinished.connect(self._refresh_password_hint)
         form.addRow(BodyLabel("账号", card), self.username_edit)
 
         self.password_edit = PasswordLineEdit(card)
@@ -90,6 +100,58 @@ class SettingsPage(QWidget):
             CaptionLabel("密码保存在 Windows 凭据管理器，不会写进配置文件或日志", card)
         )
         return card
+
+    def _build_shell_card(self) -> CardWidget:
+        card = CardWidget(self)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 16, 20, 16)
+        inner.setSpacing(10)
+        inner.addWidget(StrongBodyLabel("壳牌 LMS（导出源数据）", card))
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.shell_username_edit = LineEdit(card)
+        self.shell_username_edit.setPlaceholderText("壳牌 LMS 账号")
+        self.shell_username_edit.editingFinished.connect(self._refresh_password_hint)
+        form.addRow(BodyLabel("账号", card), self.shell_username_edit)
+
+        self.shell_password_edit = PasswordLineEdit(card)
+        self.shell_password_edit.setPlaceholderText("留空则不修改已保存的密码")
+        form.addRow(BodyLabel("密码", card), self.shell_password_edit)
+
+        self.shell_login_url_edit = LineEdit(card)
+        form.addRow(BodyLabel("登录地址", card), self.shell_login_url_edit)
+
+        self.export_region_edit = LineEdit(card)
+        self.export_region_edit.setPlaceholderText("如：粤西粤北区域")
+        form.addRow(BodyLabel("导出区域", card), self.export_region_edit)
+
+        inner.addLayout(form)
+
+        # 车型映射文件：路径 + 浏览
+        car_row = QHBoxLayout()
+        car_row.setSpacing(8)
+        car_row.addWidget(BodyLabel("车型表", card))
+        self.car_file_edit = LineEdit(card)
+        self.car_file_edit.setPlaceholderText("车型映射 Excel（可留空，车型将全部填「未知」）")
+        car_row.addWidget(self.car_file_edit, 1)
+        car_browse = PushButton("浏览", card)
+        car_browse.clicked.connect(self._browse_car_file)
+        car_row.addWidget(car_browse)
+        inner.addLayout(car_row)
+
+        self.shell_password_hint = CaptionLabel("", card)
+        inner.addWidget(self.shell_password_hint)
+        inner.addWidget(
+            CaptionLabel("壳牌和 SDCC 是两套独立账号；密码同样只存凭据管理器", card)
+        )
+        return card
+
+    def _browse_car_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择车型映射文件", "", EXCEL_FILTER)
+        if path:
+            self.car_file_edit.setText(path)
 
     def _build_import_card(self) -> CardWidget:
         card = CardWidget(self)
@@ -168,6 +230,10 @@ class SettingsPage(QWidget):
     def load_config(self, config: Config) -> None:
         self._config = config
         self.username_edit.setText(config.username)
+        self.shell_username_edit.setText(getattr(config, "shell_username", ""))
+        self.shell_login_url_edit.setText(getattr(config, "shell_login_url", ""))
+        self.export_region_edit.setText(getattr(config, "export_region", ""))
+        self.car_file_edit.setText(getattr(config, "car_file", ""))
         self.project_edit.setText(config.project)
         self.template_edit.setText(config.template)
         self.login_url_edit.setText(config.login_url)
@@ -177,13 +243,19 @@ class SettingsPage(QWidget):
         self._refresh_password_hint()
 
     def _refresh_password_hint(self) -> None:
-        username = self.username_edit.text().strip()
         if not credentials.available():
-            self.password_hint.setText("⚠ 未安装 keyring，无法保存密码：pip install keyring")
-        elif username and credentials.has_password(username):
-            self.password_hint.setText("✓ 已保存密码")
-        else:
-            self.password_hint.setText("尚未保存密码")
+            msg = "⚠ 未安装 keyring，无法保存密码：pip install keyring"
+            self.password_hint.setText(msg)
+            self.shell_password_hint.setText(msg)
+            return
+        username = self.username_edit.text().strip()
+        self.password_hint.setText(
+            "✓ 已保存密码" if username and credentials.has_password(username) else "尚未保存密码"
+        )
+        shell_user = self.shell_username_edit.text().strip()
+        self.shell_password_hint.setText(
+            "✓ 已保存密码" if shell_user and credentials.has_password(shell_user) else "尚未保存密码"
+        )
 
     def _save(self) -> None:
         username = self.username_edit.text().strip()
@@ -196,6 +268,10 @@ class SettingsPage(QWidget):
         config.project = self.project_edit.text().strip()
         config.template = self.template_edit.text().strip()
         config.login_url = self.login_url_edit.text().strip()
+        config.shell_username = self.shell_username_edit.text().strip()
+        config.shell_login_url = self.shell_login_url_edit.text().strip()
+        config.export_region = self.export_region_edit.text().strip()
+        config.car_file = self.car_file_edit.text().strip()
         config.headless = self.headless_switch.isChecked()
         config.minimize_to_tray = self.tray_switch.isChecked()
         config.autostart = self.autostart_switch.isChecked()
@@ -206,7 +282,15 @@ class SettingsPage(QWidget):
             if credentials.set_password(username, password):
                 self.password_edit.clear()
             else:
-                self._warn("密码保存失败，其余设置已保存")
+                self._warn("SDCC 密码保存失败")
+
+        shell_password = self.shell_password_edit.text()
+        if shell_password:
+            shell_user = config.shell_username
+            if shell_user and credentials.set_password(shell_user, shell_password):
+                self.shell_password_edit.clear()
+            else:
+                self._warn("壳牌密码保存失败（请先填壳牌账号）")
 
         if autostart.supported():
             autostart.apply(config.autostart)
@@ -221,6 +305,8 @@ class SettingsPage(QWidget):
         self.project_edit.setText(defaults.project)
         self.template_edit.setText(defaults.template)
         self.login_url_edit.setText(defaults.login_url)
+        self.shell_login_url_edit.setText(defaults.shell_login_url)
+        self.export_region_edit.setText(defaults.export_region)
         self.headless_switch.setChecked(defaults.headless)
         self.tray_switch.setChecked(defaults.minimize_to_tray)
 

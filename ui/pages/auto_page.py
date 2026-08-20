@@ -33,6 +33,8 @@ MAX_PROGRESS_LINES = 200
 STEP_LABELS = {
     "queue": "队列",
     "lock": "互斥锁",
+    "export": "导出",
+    "convert": "转换",
     "run": "任务",
     "browser": "浏览器",
     "login": "登录",
@@ -89,7 +91,7 @@ class AutoPage(QWidget):
         text = QVBoxLayout()
         text.setSpacing(2)
         text.addWidget(StrongBodyLabel("自动上传模式", card))
-        text.addWidget(CaptionLabel("开启后程序驻留托盘，每天定时把队列里的文件传到 SDCC", card))
+        text.addWidget(CaptionLabel("开启后程序驻留托盘，每天定时从壳牌导出订单、转换并上传到 SDCC", card))
         row.addLayout(text)
         row.addStretch(1)
 
@@ -128,7 +130,7 @@ class AutoPage(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(12)
-        self.upload_btn = PrimaryPushButton("立即上传一次", card)
+        self.upload_btn = PrimaryPushButton("立即执行一次", card)
         self.upload_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_btn)
 
@@ -176,11 +178,11 @@ class AutoPage(QWidget):
     def refresh_queue(self) -> None:
         pending = latest_pending()
         if pending is None:
-            self.queue_label.setText("待上传队列：空（到点会跳过）")
-            self.upload_btn.setEnabled(False)
-            return
-        stamp = datetime.fromtimestamp(pending.stat().st_mtime).strftime("%m-%d %H:%M")
-        self.queue_label.setText(f"待上传队列：{pending.name}（{stamp} 生成）")
+            self.queue_label.setText("待上传队列：空（执行时会自动从壳牌导出并转换）")
+        else:
+            stamp = datetime.fromtimestamp(pending.stat().st_mtime).strftime("%m-%d %H:%M")
+            self.queue_label.setText(f"待上传队列：{pending.name}（{stamp} 生成，将优先上传）")
+        # 流水线会自己导出，队列空也能执行，所以按钮始终可点
         self.upload_btn.setEnabled(True)
 
     def set_next_run(self, next_run: Optional[datetime]) -> None:
@@ -190,8 +192,8 @@ class AutoPage(QWidget):
             self.next_run_label.setText(f"下次执行：{next_run:%Y-%m-%d %H:%M}")
 
     def set_running(self, running: bool) -> None:
-        self.upload_btn.setEnabled(not running and latest_pending() is not None)
-        self.upload_btn.setText("上传中…" if running else "立即上传一次")
+        self.upload_btn.setEnabled(not running)
+        self.upload_btn.setText("执行中…" if running else "立即执行一次")
         self.progress_bar.setVisible(running)
         if running:
             self.progress_text.clear()

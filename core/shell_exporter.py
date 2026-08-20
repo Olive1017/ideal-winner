@@ -203,6 +203,7 @@ def _set_plan_dates(page, logger) -> None:
 
 
 def _select_region(page, region: str, logger) -> None:
+    
     """在运输区域下拉控件里勾选目标区域。
 
     控件是 ui-dict：一个 readonly 输入框 + 箭头，点箭头展开面板。面板里：
@@ -254,6 +255,23 @@ def _select_region(page, region: str, logger) -> None:
     # 4) 点「确定」
     dropview.locator(".sure").first.click()
     logger.success("navigate", f"已选择区域：{region}")
+
+def _click_query(page, logger) -> None:
+    """点「查询」刷新列表。导出前必须先查询，否则导的是空/旧数据。
+
+    查询按钮是 <div id="3_Query" class="ui-btn Query"><button>...</button></div>，
+    里面是真 <button>；用 class 定位（id 的 "3_" 前缀会变）。
+    """
+    logger.start("navigate", "点击查询")
+    page.locator(".ui-btn.Query button").first.click()
+    # 等列表按条件刷新出来再导出
+    try:
+        page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        pass
+    page.wait_for_timeout(500)
+    logger.success("navigate", "查询完成")
+
 
 def _trigger_export(page, target: Path, logger, report) -> Path:
     """点「导出」并等浏览器下载，存到 target。"""
@@ -330,6 +348,7 @@ def export_orders(
             _set_plan_dates(list_page, logger)
             region = getattr(config, "export_region", "") or DEFAULT_REGION
             _select_region(list_page, region, logger)
+            _click_query(list_page, logger)  
             result = _trigger_export(list_page, target, logger, report)
             return result
         except UploadError:

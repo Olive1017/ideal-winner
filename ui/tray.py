@@ -79,7 +79,7 @@ class TrayIcon(QSystemTrayIcon):
         show_action.triggered.connect(self.showRequested)
         menu.addAction(show_action)
 
-        upload_action = QAction("立即上传一次", menu)
+        upload_action = QAction("立即执行一次", menu)
         upload_action.triggered.connect(self.uploadRequested)
         menu.addAction(upload_action)
 

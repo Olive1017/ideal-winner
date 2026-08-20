@@ -77,7 +77,7 @@ NAV_MENU_TIMEOUT_MS = 10_000
 # 反过来先点按钮会白等一个点击超时（日志里见过 30 秒），所以先快速扫。
 LOGIN_PAGE_QUICK_SCAN_MS = 2_000
 
-# 人工登录（python main.py login）最多等多久，以及等待期间多久播报一次
+# 人工登录最多等多久，以及等待期间多久播报一次
 MANUAL_LOGIN_TIMEOUT_MS = 600_000
 LOGIN_HEARTBEAT_SEC = 30.0
 
@@ -364,7 +364,7 @@ def _auto_login(page, context, config, password: str, logger):
     if not config.username or not password:
         raise UploadError(
             "没有可复用的会话，也没有账号密码。"
-            "请先到「设置」里录入账号密码，或跑一次 python main.py login",
+            "请先到「设置」里录入账号密码，然后从界面或托盘手动触发一次上传",
             ErrorKind.FATAL,
         )
 
@@ -398,7 +398,7 @@ def _auto_login(page, context, config, password: str, logger):
         raise UploadError(
             f"自动登录失败：{detail}。"
             "如果是验证码，说明这台机器的设备信任已过期，"
-            "手动触发一次上传（或 python main.py login）即可转人工登录",
+            "从界面或托盘手动触发一次上传即可转人工登录",
             ErrorKind.FATAL,
         )
     raise UploadError(f"自动登录失败：{detail}", ErrorKind.RETRYABLE)
@@ -561,10 +561,9 @@ def _manual_login_and_save(
 ) -> Path:
     """弹有头浏览器让人工登录，检测到「我的工作台」后把会话写进 target。
 
-    ``save_session``（python main.py login）和上传流程里的验证码兜底
-    （``_manual_login_then_continue``）共用这一段。它总是起**独立的**
-    有头浏览器和全新 context，登完整个关掉——所以即使上传那边配了
-    headless，人工登录也照样有窗口给人操作。
+    唯一的调用方是上传流程里的验证码兜底（``_manual_login_then_continue``）。
+    它总是起**独立的**有头浏览器和全新 context，登完整个关掉——所以即使
+    上传那边配了 headless，人工登录也照样有窗口给人操作。
     """
     browser = _launch_browser(playwright, config, logger, headless=False)
     # 故意用全新 context：既然是来重新登录的，就该从干净状态开始，
@@ -600,47 +599,6 @@ def _manual_login_and_save(
             browser.close()
 
 
-def save_session(
-    config,
-    logger,
-    password: str = "",
-    session_file: Optional[PathLike] = None,
-    timeout_ms: int = MANUAL_LOGIN_TIMEOUT_MS,
-) -> Path:
-    """人工登录一次，把登录状态存成 storage_state 供以后复用。
-
-    有账号密码就自动填上，但**不替你提交**——SDCC 要短信验证码，
-    只能你自己输。程序在旁边轮询，一看到「我的工作台」就存盘退出。
-
-    这条路是给 ``python main.py login`` 用的，人在跟前，所以强制有头浏览器。
-    上传流程里的验证码兜底走的是同一段逻辑（``_manual_login_and_save``）。
-
-    Args:
-        config: services.config.Config 实例。
-        logger: services.logger.RunLogger 实例。
-        password: keyring 里的密码，没有就留空，全靠手输。
-        session_file: 会话保存位置，默认 services.config.session_path()。
-        timeout_ms: 最多等多久，默认 10 分钟。
-
-    Returns:
-        保存好的 session.json 路径。
-
-    Raises:
-        UploadError: 浏览器起不来、超时没等到登录成功、或者存盘失败。
-    """
-    target = _resolve_session_file(session_file)
-    if target is None:
-        raise UploadError("无法确定会话文件的保存位置", ErrorKind.FATAL)
-
-    with sync_playwright() as playwright:
-        return _manual_login_and_save(
-            playwright, config, logger, password, target, timeout_ms
-        )
-
-
-# --------------------------------------------------------------------------- #
-# 各步骤
-# --------------------------------------------------------------------------- #
 
 
 def _find_import_button(page, config, logger):

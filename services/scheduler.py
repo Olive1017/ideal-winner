@@ -33,12 +33,7 @@ def run_upload_once(
     progress: ProgressCallback = None,
     interactive: bool = False,
 ) -> UploadResult:
-    """执行一次上传。不抛异常，所有结果都包成 UploadResult 返回。
-
-    interactive=True 表示是人在屏幕前手动触发的：没有可用会话、或账号密码
-    被验证码拦住时，允许弹有头浏览器转人工登录。定时任务保持 False，
-    缺会话直接报错，不弹窗干等。
-    """
+   
     config = config or Config.load()
     logger = RunLogger(run_id or new_run_id())
     started = time.monotonic()

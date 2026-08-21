@@ -1,4 +1,4 @@
-"""自动上传页：开关、时间、队列状态、实时进度。
+"""运行页：自动上传开关、时间、队列状态、实时进度。
 
 页面本身不持有调度器，只发信号；调度器由主窗口统一管理，
 避免关窗口后调度器跟着死掉。
@@ -54,10 +54,11 @@ STATUS_ICONS = {
 
 
 class AutoPage(QWidget):
-    """自动上传页。"""
+    """运行页。"""
 
     settingsChanged = Signal(bool, str)  # enabled, "HH:MM"
     uploadRequested = Signal()
+    reexportRequested = Signal()
 
     def __init__(self, config: Config, parent=None) -> None:
         super().__init__(parent)
@@ -75,7 +76,7 @@ class AutoPage(QWidget):
         layout.setContentsMargins(28, 20, 28, 20)
         layout.setSpacing(16)
 
-        layout.addWidget(SubtitleLabel("自动上传", self))
+        layout.addWidget(SubtitleLabel("运行", self))
         layout.addWidget(self._build_switch_card())
         layout.addWidget(self._build_status_card())
         layout.addWidget(self._build_progress_card(), 1)
@@ -128,11 +129,21 @@ class AutoPage(QWidget):
         self.queue_label = StrongBodyLabel("待上传队列：检查中…", card)
         inner.addWidget(self.queue_label)
 
+        # 本次执行会不会从壳牌导出，直接写在脸上，不让用户猜
+        self.plan_label = CaptionLabel("", card)
+        self.plan_label.setWordWrap(True)
+        inner.addWidget(self.plan_label)
+
         row = QHBoxLayout()
         row.setSpacing(12)
         self.upload_btn = PrimaryPushButton("立即执行一次", card)
         self.upload_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_btn)
+
+        # 无视队列、强制从壳牌拉最新订单再跑一整条流水线
+        self.reexport_btn = PushButton("重新从壳牌导出", card)
+        self.reexport_btn.clicked.connect(self.reexportRequested)
+        row.addWidget(self.reexport_btn)
 
         self.refresh_btn = PushButton("刷新队列", card)
         self.refresh_btn.clicked.connect(self.refresh_queue)
@@ -178,10 +189,17 @@ class AutoPage(QWidget):
     def refresh_queue(self) -> None:
         pending = latest_pending()
         if pending is None:
-            self.queue_label.setText("待上传队列：空（执行时会自动从壳牌导出并转换）")
+            self.queue_label.setText("待上传队列：空")
+            self.plan_label.setText(
+                "📋 本次将【从壳牌导出】最新订单 → 转换 → 上传（待上传队列为空）"
+            )
         else:
             stamp = datetime.fromtimestamp(pending.stat().st_mtime).strftime("%m-%d %H:%M")
-            self.queue_label.setText(f"待上传队列：{pending.name}（{stamp} 生成，将优先上传）")
+            self.queue_label.setText(f"待上传队列：{pending.name}（{stamp} 生成）")
+            self.plan_label.setText(
+                f"📋 本次将【跳过导出】，直接上传：{pending.name}。"
+                "想拉最新的请点「重新从壳牌导出」"
+            )
         # 流水线会自己导出，队列空也能执行，所以按钮始终可点
         self.upload_btn.setEnabled(True)
 
@@ -193,6 +211,7 @@ class AutoPage(QWidget):
 
     def set_running(self, running: bool) -> None:
         self.upload_btn.setEnabled(not running)
+        self.reexport_btn.setEnabled(not running)
         self.upload_btn.setText("执行中…" if running else "立即执行一次")
         self.progress_bar.setVisible(running)
         if running:

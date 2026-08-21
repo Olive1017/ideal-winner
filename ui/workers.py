@@ -39,15 +39,25 @@ class ConvertWorker(QThread):
 
 
 class UploadWorker(QThread):
-    """后台执行一次流水线（导出→转换→上传），实时向 UI 报进度。"""
+    """后台执行一次流水线（导出→转换→上传），实时向 UI 报进度。
+
+    force_export=True 时忽略待上传队列，强制从壳牌重新导出最新订单再走后续流程。
+    """
 
     progressed = Signal(str, str, str)  # step, status, message
     finishedResult = Signal(object)  # UploadResult
 
-    def __init__(self, config: Config, file_path: Optional[str] = None, parent=None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        file_path: Optional[str] = None,
+        force_export: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.config = config
         self.file_path = file_path
+        self.force_export = force_export
 
     def run(self) -> None:  # noqa: D102
         def progress(step: str, status: str, message: str) -> None:
@@ -56,6 +66,10 @@ class UploadWorker(QThread):
         # 人从界面/托盘点的「立即执行」，interactive=True：
         # 没有可用会话时允许弹有头浏览器转人工登录，登完接着传
         result = run_pipeline_once(
-            self.config, file_path=self.file_path, progress=progress, interactive=True
+            self.config,
+            file_path=self.file_path,
+            progress=progress,
+            interactive=True,
+            force_export=self.force_export,
         )
         self.finishedResult.emit(result)

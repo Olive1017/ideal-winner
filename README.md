@@ -4,12 +4,14 @@
 
 ## 它做什么
 
-原本的流程：收到壳牌订单 → 手工整理成导入格式 → 登录 SDCC → 点十几下传上去。
+原本的流程：登录壳牌导出订单 → 手工整理成导入格式 → 登录 SDCC → 点十几下传上去。
 
-现在：选两个文件点一下转换，剩下的每天定时自己跑。
+现在：每天定时自动从壳牌 LMS 导出订单、转换成 SDCC 导入格式、再传上去，全程无人值守。
 
-**转换不自动化，只自动化上传。** 因为两个输入文件（壳牌订单、车型映射）都需要人看一眼，
-让程序自己去猜该拿哪个文件风险比省的那两下点击大得多。
+**全流程自动化：导出 → 转换 → 上传。** 每天到点自己跑完；出问题会重试、会截图、会记日志。
+
+需要人工介入的场景仍然保留：在「转换」页可以手动选壳牌订单 + 车型表转换、放进待上传队列
+（比如某天数据要人先看一眼时）。手动放进队列的文件会被优先上传，自动导出会自动跳过。
 
 ## 快速开始
 
@@ -20,30 +22,18 @@ playwright install chromium
 python main.py
 ```
 
-首次使用先到「设置」页填 SDCC 账号密码。
+首次使用先到「设置」页填 SDCC 账号密码、壳牌 LMS 账号密码，并选好车型映射表。
 
 ## 界面
 
 | 页面 | 用途 |
 |---|---|
-| 转换 | 选文件 → 转换 → 预览 → 导出或放入待上传队列 |
-| 自动上传 | 开关、每日时间、队列状态、立即跑一次 |
+| 转换 | 手动兜底：选文件 → 转换 → 预览 → 导出或放入待上传队列 |
+| 运行 | 自动上传开关、每日时间、队列状态、立即执行一次、重新从壳牌导出 |
 | 日志 | 按每次执行分组查看，失败带截图 |
-| 设置 | 账号密码、项目模板、静默运行、开机自启 |
+| 设置 | 账号密码、壳牌导出配置、项目模板、静默运行、开机自启 |
 
-关闭窗口默认收到托盘，定时任务继续生效。托盘图标会变色：蓝=空闲，黄=上传中，绿=成功，红=失败。
-
-## 命令行
-
-排查问题时比界面方便：
-
-```bash
-python main.py convert 订单.xlsx -c 车型.xlsx   # 转换并放进队列
-python main.py upload                          # 立即上传，实时打印每一步
-python main.py config --username 13100000000   # 修改配置
-python main.py password                        # 录入密码
-python main.py ui --minimized                  # 启动后直接进托盘
-```
+关闭窗口默认收到托盘，定时任务继续生效。托盘图标会变色：蓝=空闲，黄=运行中，绿=成功，红=失败。
 
 ## 转换规则
 
@@ -59,9 +49,6 @@ python main.py ui --minimized                  # 启动后直接进托盘
 | 计划发货时间 | 要求到厂日期 |
 | 计划到达时间 | 要求到厂日期 + 1 天 |
 | 导单日期 | 要求到厂日期 |
-
-> 旧版 README 写的是「以文件创建时间为基准，+1/+3 天」，与代码不符。
-> 已按代码实际行为修正。
 
 日期解析不了会直接报错并指出 Excel 行号，不会把 `NaT` 当成字符串写进去。
 
@@ -81,9 +68,10 @@ python main.py ui --minimized                  # 启动后直接进托盘
 
 ## 自动上传
 
-开启后程序驻留托盘，每天到点把队列里最新的文件传上去。
+开启后程序驻留托盘，每天到点自动跑完整流水线：**从壳牌导出 → 转换 → 上传**。
 
-**队列为空就静默跳过**，只记一条日志。没单的日子不应该报错。
+队列里如果已经有手动备好的文件（在「转换」页放进去的），就优先传那份、跳过导出；
+队列为空才现去壳牌导出当天的订单。想无视队列、强制拉最新，在「运行」页点「重新从壳牌导出」。
 
 ### 重试
 
@@ -106,7 +94,8 @@ ideal-winner/
 ├── core/                # 业务逻辑，不依赖 UI
 │   ├── models.py        # 数据类与错误类型
 │   ├── converter.py     # Excel 转换
-│   └── uploader.py      # Playwright RPA
+│   ├── shell_exporter.py # 从壳牌 LMS 导出订单源数据（Playwright）
+│   └── uploader.py      # Playwright RPA 上传 SDCC
 ├── services/            # 支撑设施
 │   ├── config.py        # 配置与目录
 │   ├── credentials.py   # 密码存取
@@ -126,10 +115,11 @@ ideal-winner/
 
 ## 数据存在哪
 
-全部在 `%APPDATA%\ShellConvert\`：
+全部在 `%APPDATA%\\ShellConvert\\`：
 
 ```
 config.json                          配置（不含密码）
+downloads/                           壳牌导出的订单源数据
 pending/                             待上传队列
 archive/2026-08-10/ok_093015_*.xlsx  传完归档
 logs/run.jsonl                       日志
@@ -153,7 +143,7 @@ logs/{run_id}_error.png              失败截图
 ## 打包
 
 ```bash
-pyinstaller main.py --noconsole --onefile --name ShellConvert \
+pyinstaller main.py --noconsole --onefile --name ShellConvert \\
   --icon assets/app.ico --add-data "assets;assets"
 ```
 
@@ -165,4 +155,4 @@ pyinstaller main.py --noconsole --onefile --name ShellConvert \
 - 仅 Windows（开机自启、凭据管理器）；其他平台可跑命令行但这两个功能失效
 - 无自动更新，换版本需重新发 exe
 - SDCC 页面改版可能导致选择器失效，看日志截图定位后改 `core/uploader.py`
-
+- 壳牌 LMS 页面改版同理，改 `core/shell_exporter.py`

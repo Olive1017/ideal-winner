@@ -37,6 +37,9 @@ from .workers import UploadWorker
 
 NEXT_RUN_REFRESH_MS = 30_000
 
+# 窗口最小尺寸：低于这个高度，导航栏底部的「设置」项会被挤出可视区
+MIN_WINDOW_SIZE = (960, 640)
+
 
 class MainWindow(FluentWindow):
     """主窗口。"""
@@ -71,6 +74,9 @@ class MainWindow(FluentWindow):
     def _init_window(self) -> None:
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(make_icon("idle"))
+        # 先给最小尺寸再 resize：否则内容多时无边框窗口的上下边可能拖不动，
+        # 且底部导航项（设置）会被挤没
+        self.setMinimumSize(*MIN_WINDOW_SIZE)
         self.resize(1060, 740)
         self.navigationInterface.setExpandWidth(180)
 
@@ -81,7 +87,7 @@ class MainWindow(FluentWindow):
         self.settings_page = SettingsPage(self.config, self)
 
         self.addSubInterface(self.convert_page, FIF.SYNC, "转换")
-        self.addSubInterface(self.auto_page, FIF.SEND, "自动上传")
+        self.addSubInterface(self.auto_page, FIF.SEND, "运行")
         self.addSubInterface(self.log_page, FIF.HISTORY, "日志")
         self.addSubInterface(
             self.settings_page, FIF.SETTING, "设置", NavigationItemPosition.BOTTOM
@@ -107,6 +113,7 @@ class MainWindow(FluentWindow):
 
         self.auto_page.settingsChanged.connect(self._on_schedule_changed)
         self.auto_page.uploadRequested.connect(self._start_manual_upload)
+        self.auto_page.reexportRequested.connect(self._start_reexport)
 
         self.settings_page.configSaved.connect(self._on_config_saved)
 
@@ -141,18 +148,26 @@ class MainWindow(FluentWindow):
     def _refresh_next_run(self) -> None:
         self.auto_page.set_next_run(self.scheduler.next_run_time)
 
-    # ---------------------------------------------------------- 手动上传
+    # ---------------------------------------------------------- 手动执行
 
     def _start_manual_upload(self) -> None:
+        """立即执行一次：按队列优先级取文件（队列空才自动导出）。"""
+        self._start_worker(force_export=False)
+
+    def _start_reexport(self) -> None:
+        """重新从壳牌导出：无视队列，强制拉最新订单再跑整条流水线。"""
+        self._start_worker(force_export=True)
+
+    def _start_worker(self, force_export: bool = False) -> None:
         if self._worker is not None and self._worker.isRunning():
-            self._info("已经有一个上传任务在跑了")
+            self._info("已经有一个任务在跑了")
             return
 
         self.auto_page.set_running(True)
         if self.tray is not None:
             self.tray.set_state("busy")
 
-        self._worker = UploadWorker(self.config, parent=self)
+        self._worker = UploadWorker(self.config, force_export=force_export, parent=self)
         self._worker.progressed.connect(self._on_progress)
         self._worker.finishedResult.connect(self._on_upload_result)
         self._worker.start()

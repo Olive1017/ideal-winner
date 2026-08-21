@@ -80,13 +80,15 @@ def run_pipeline_once(
     file_path: Optional[PathLike] = None,
     progress: ProgressCallback = None,
     interactive: bool = False,
+    force_export: bool = False,
 ) -> UploadResult:
     """跑一次完整流水线：导出 -> 转换 -> 入队 -> 上传。
 
     取文件的优先级：
     1. 传了 file_path 就用它（手动指定某个文件上传）
-    2. 待上传队列里已有文件就用它（手动在「转换」页备好的，或上次重试留下的）
-    3. 都没有才现跑「导出 + 转换」拿今天的
+    2. force_export=True 时无视队列，直接从壳牌重新导出最新订单
+    3. 待上传队列里已有文件就用它（手动在「转换」页备好的，或上次重试留下的）
+    4. 都没有才现跑「导出 + 转换」拿今天的
     """
     config = config or Config.load()
     logger = RunLogger(run_id or new_run_id())
@@ -114,9 +116,14 @@ def run_pipeline_once(
         if file_path is not None:
             target = Path(file_path)
         else:
-            target = latest_pending()
+            if force_export:
+                # 强制重新导出：忽略待上传队列里已有的文件，直接从壳牌拉最新的
+                report("queue", "info", "强制重新导出：忽略待上传队列，从壳牌拉取最新订单")
+                target = None
+            else:
+                target = latest_pending()
             if target is None:
-                # 队列空，现跑导出 + 转换拿今天的文件
+                # 队列空（或强制重新导出），现跑导出 + 转换拿今天的文件
                 try:
                     target = _export_and_convert(config, logger, report)
                 except ConvertError as exc:
@@ -280,10 +287,15 @@ class UploadScheduler:
 
     # ---- 执行 ----
 
-    def run_now(self, file_path: Optional[PathLike] = None) -> UploadResult:
+    def run_now(
+        self,
+        file_path: Optional[PathLike] = None,
+        force_export: bool = False,
+    ) -> UploadResult:
         """手动触发，同步执行（UI 侧放到子线程里调）。
 
         人在屏幕前，允许转人工登录（弹有头浏览器输验证码）。
+        force_export=True 时忽略队列，强制从壳牌重新导出最新订单。
         """
         result = run_pipeline_once(
             self.config,
@@ -291,6 +303,7 @@ class UploadScheduler:
             file_path=file_path,
             progress=self.progress,
             interactive=True,
+            force_export=force_export,
         )
         self._notify(result)
         return result

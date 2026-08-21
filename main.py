@@ -1,6 +1,10 @@
 """程序入口。
 
 只做三件事：单实例检查、日志初始化、拉起界面。
+
+命令行子命令（convert / upload / login / session / config / password）已移除：
+UI 上线后就没再用过，但维护成本摊在 main、uploader.save_session、
+config.session_info 三处。真要临时跑一段逻辑，直接 python -c 导模块更快。
 """
 
 from __future__ import annotations

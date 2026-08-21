@@ -29,7 +29,6 @@ from services.scheduler import UploadScheduler
 from services.single_instance import app_lock
 
 from .pages.auto_page import AutoPage
-from .pages.convert_page import ConvertPage
 from .pages.log_page import LogPage
 from .pages.settings_page import SettingsPage
 from .tray import APP_TITLE, TrayIcon, make_icon
@@ -81,12 +80,10 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setExpandWidth(180)
 
     def _init_pages(self) -> None:
-        self.convert_page = ConvertPage(self)
         self.auto_page = AutoPage(self.config, self)
         self.log_page = LogPage(self)
         self.settings_page = SettingsPage(self.config, self)
 
-        self.addSubInterface(self.convert_page, FIF.SYNC, "转换")
         self.addSubInterface(self.auto_page, FIF.SEND, "运行")
         self.addSubInterface(self.log_page, FIF.HISTORY, "日志")
         self.addSubInterface(
@@ -109,8 +106,6 @@ class MainWindow(FluentWindow):
         self.scheduler.start()
 
     def _connect_signals(self) -> None:
-        self.convert_page.queueChanged.connect(self.auto_page.refresh_queue)
-
         self.auto_page.settingsChanged.connect(self._on_schedule_changed)
         self.auto_page.uploadRequested.connect(self._start_manual_upload)
         self.auto_page.reexportRequested.connect(self._start_reexport)

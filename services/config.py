@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
+import re
 import shutil
 import sys
 from dataclasses import asdict, dataclass, field, fields
@@ -9,13 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
-APP_NAME = "ShellConvert"
+APP_NAME = "SDCC订单工具"
 CONFIG_FILENAME = "config.json"
 
-# Playwright storage_state（登录会话）
-SESSION_FILENAME = "session.json"
-
-# 待上传文件的统一文件名，保证队列里始终只有最新的一份
+# 新流程不再使用固定 pending/ 目录以及 session.json；保留兼容字段，避免旧调用直接报错。
 UPLOAD_FILENAME = "SDCC导入版.xlsx"
 EXCEL_SUFFIXES = {".xlsx", ".xls"}
 
@@ -35,39 +32,59 @@ PathLike = Union[str, Path]
 # --------------------------------------------------------------------------- #
 
 
-def app_dir() -> Path:
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
-    else:
-        base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    path = Path(base) / APP_NAME
+def work_dir() -> Path:
+    """显式的用户工作目录：~/SDCC订单工具。"""
+    path = Path.home() / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def app_dir() -> Path:
+    """兼容旧调用：本项目已统一使用工作目录。"""
+    return work_dir()
+
+
+def config_path() -> Path:
+    return work_dir() / CONFIG_FILENAME
 
 
 def _sub_dir(name: str) -> Path:
-    path = app_dir() / name
+    path = work_dir() / name
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def pending_dir() -> Path:
-    """待上传队列。UI 转换完写进来，定时任务到点取走。"""
-    return _sub_dir("pending")
+def shell_orders_dir() -> Path:
+    """壳牌 LMS 原始导出订单目录。"""
+    return _sub_dir("壳牌订单")
+
+
+def sdcc_orders_dir() -> Path:
+    """转换后的 SDCC 文件目录。"""
+    return _sub_dir("SDCC订单")
 
 
 def archive_dir() -> Path:
-    """上传完的归档，成功失败都留档，便于事后核对。"""
-    return _sub_dir("archive")
+    """归档目录，按日期组织。"""
+    return _sub_dir("归档")
 
 
 def log_dir() -> Path:
-    return _sub_dir("logs")
+    return _sub_dir("日志")
+
+
+def screenshot_dir() -> Path:
+    return _sub_dir("截图")
+
+
+def pending_dir() -> Path:
+    """兼容旧命名：现在指向 SDCC订单/。"""
+    return sdcc_orders_dir()
 
 
 def download_dir() -> Path:
-    """壳牌导出的源数据存这里，和 pending/、archive/ 平级。"""
-    return _sub_dir("downloads")
+    """兼容旧命名：原始壳牌导出目录。"""
+    return shell_orders_dir()
 
 
 def resource_path(relative: str) -> Path:
@@ -77,95 +94,24 @@ def resource_path(relative: str) -> Path:
     return root / relative
 
 
-# --------------------------------------------------------------------------- #
-# 登录会话
-# --------------------------------------------------------------------------- #
+def _safe_name(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_\-]+", "_", value or "订单")
+    return cleaned.strip("_.") or "订单"
 
 
-def session_path() -> Path:
-    """Playwright storage_state 的存放位置。
-
-    文件里是活的登录凭证，**等价于密码**——拿到它就能冒充你操作 TMS。
-    所以放在用户配置目录（不在项目里，不会被误提交到仓库），
-    写入后再收紧权限。
-    """
-    return app_dir() / SESSION_FILENAME
-
-
-def clear_session() -> bool:
-    """删掉已保存的会话，返回是否真的删掉了东西。"""
-    try:
-        session_path().unlink()
-        return True
-    except (FileNotFoundError, OSError):
-        return False
-
-
-def session_info() -> dict:
-    """读 session.json，汇总出人看得懂的会话状态。
-
-    只读 cookie 的元信息，**不碰 value**——值等同于密码，
-    不应该出现在返回值、日志或界面上。
-
-    注意：这里能算出来的只是**浏览器端**的上限。服务端那条 session
-    记录的真实 TTL 看不到，可能短得多，只能靠实跑发现。
-    """
-    path = session_path()
-    info: dict = {
-        "exists": False,
-        "path": str(path),
-        "saved_at": None,
-        "cookie_count": 0,
-        "session_only": 0,
-        "expires_at": None,
-        "error": "",
-    }
-
-    if not path.exists():
-        return info
-    info["exists"] = True
-
-    try:
-        info["saved_at"] = datetime.fromtimestamp(path.stat().st_mtime)
-    except OSError:
-        pass
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        info["error"] = f"会话文件读不出来：{exc}"
-        return info
-
-    cookies = data.get("cookies") or []
-    info["cookie_count"] = len(cookies)
-
-    # expires 为 -1 表示会话 cookie（关浏览器即失效）。
-    # 它照样会被存进 storage_state 并在下次灌回去，所以**不影响复用**，
-    # 只是看不到有效期而已。
-    stamps = []
-    for cookie in cookies:
-        expires = cookie.get("expires")
-        if expires is None or expires < 0:
-            info["session_only"] += 1
-        else:
-            stamps.append(expires)
-
-    if stamps:
-        try:
-            info["expires_at"] = datetime.fromtimestamp(max(stamps))
-        except (OSError, OverflowError, ValueError):
-            pass
-
-    return info
+def sdcc_file_name(source_name: Optional[str] = None) -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = _safe_name(Path(source_name).stem if source_name else "订单")
+    return f"SDCC_{base}_{stamp}.xlsx"
 
 
 # --------------------------------------------------------------------------- #
-# 待上传队列
+# 兼容旧调用：旧 pending/ 目录依赖保留，但不再作为核心业务目录
 # --------------------------------------------------------------------------- #
 
 
 def pending_files() -> List[Path]:
-    """待上传目录里的 Excel，按修改时间倒序。"""
+    """返回 SDCC订单/ 下的 Excel，按修改时间倒序。"""
     try:
         entries = [
             p
@@ -178,14 +124,16 @@ def pending_files() -> List[Path]:
 
 
 def latest_pending() -> Optional[Path]:
-    """取最新的一个待上传文件；一般情况下队列里就只有一个。"""
+    """取最新的一个 SDCC 文件。"""
     files = pending_files()
     return files[0] if files else None
 
 
-def put_pending(source: PathLike, filename: str = UPLOAD_FILENAME) -> Path:
-    """把转换结果放进待上传队列，同名覆盖。"""
-    target = pending_dir() / filename
+def put_pending(source: PathLike, filename: str = "") -> Path:
+    """兼容旧接口：将转换结果写入 SDCC订单/，默认创建带时间戳的文件名。"""
+    target_dir = pending_dir()
+    target_name = filename or sdcc_file_name(str(source))
+    target = target_dir / target_name
     shutil.copyfile(str(source), str(target))
     return target
 
@@ -202,11 +150,7 @@ def clear_pending() -> int:
 
 
 def clear_stale_pending() -> List[Path]:
-    """删掉不是今天生成的待上传文件，返回被删掉的文件列表。
-
-    定时任务每天开跑前调用：避免昨天失败、连重试也没成的残留文件，
-    第二天被当成「队列里已有文件」直接又传一遍旧数据。
-    """
+    """清理比今天更早的 SDCC 文件，避免旧文件被重新当成待上传候选。"""
     from datetime import date
 
     removed: List[Path] = []
@@ -226,7 +170,7 @@ def clear_stale_pending() -> List[Path]:
 
 
 def archive_pending(file_path: PathLike, success: bool) -> Path:
-    """上传结束后归档到 ``archive/YYYY-MM-DD/`` 下。"""
+    """归档 SDCC 订单文件到 archive/YYYY-MM-DD/。"""
     source = Path(file_path)
     now = datetime.now()
     day_dir = archive_dir() / now.strftime("%Y-%m-%d")
@@ -258,8 +202,6 @@ class Config:
     export_region: str = DEFAULT_EXPORT_REGION
     car_file: str = ""  # 车型映射表路径；相对稳定，配一次即可
 
-    reuse_session: bool = True
-
     # 自动上传
     auto_upload_enabled: bool = False
     schedule_time: str = "18:30"  # HH:MM，24 小时制
@@ -277,26 +219,22 @@ class Config:
 
     @classmethod
     def path(cls) -> Path:
-        return app_dir() / CONFIG_FILENAME
+        return config_path()
 
     @classmethod
     def load(cls) -> "Config":
         path = cls.path()
         if not path.exists():
-            # 不落盘：默认值留在代码里。文件里只会有用户真正改过的覆盖项，
-            # 以后改代码里的 DEFAULT_*，所有机器下次启动自动用新值。
             return cls()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            # 配置坏了不能让程序起不来，退回默认值
             return cls()
         known = {f.name for f in fields(cls)}
         overrides = {k: v for k, v in raw.items() if k in known}
         return cls(**overrides)
 
     def save(self) -> None:
-        # 只写「和默认值不同」的覆盖项；值改回默认的字段会自动从文件里消失
         defaults = asdict(Config())
         overrides = {k: v for k, v in asdict(self).items() if v != defaults[k]}
         path = self.path()

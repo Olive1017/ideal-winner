@@ -6,11 +6,19 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QTime, Signal
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -25,7 +33,8 @@ from qfluentwidgets import (
     TimeEdit,
 )
 
-from services.config import Config, latest_pending
+from services.config import Config, pending_files, sdcc_orders_dir
+from ui.dialogs.order_preview_dialog import OrderPreviewDialog
 
 # 进度框最多保留的行数，再多就去日志页看
 MAX_PROGRESS_LINES = 200
@@ -76,9 +85,10 @@ class AutoPage(QWidget):
         layout.setContentsMargins(28, 20, 28, 20)
         layout.setSpacing(16)
 
-        layout.addWidget(SubtitleLabel("运行", self))
+        layout.addWidget(SubtitleLabel("订单处理", self))
         layout.addWidget(self._build_switch_card())
         layout.addWidget(self._build_status_card())
+        layout.addWidget(self._build_pending_card())
         layout.addWidget(self._build_progress_card(), 1)
 
     def _build_switch_card(self) -> CardWidget:
@@ -91,8 +101,13 @@ class AutoPage(QWidget):
         row = QHBoxLayout()
         text = QVBoxLayout()
         text.setSpacing(2)
-        text.addWidget(StrongBodyLabel("自动上传模式", card))
-        text.addWidget(CaptionLabel("开启后程序驻留托盘，每天定时从壳牌导出订单、转换并上传到 SDCC", card))
+        text.addWidget(StrongBodyLabel("自动准备订单", card))
+        text.addWidget(
+            CaptionLabel(
+                "开启后程序驻留托盘，每天定时从壳牌导出订单并转换成 SDCC 格式，不自动上传 SDCC。",
+                card,
+            )
+        )
         row.addLayout(text)
         row.addStretch(1)
 
@@ -126,7 +141,7 @@ class AutoPage(QWidget):
         inner.setContentsMargins(20, 16, 20, 16)
         inner.setSpacing(12)
 
-        self.queue_label = StrongBodyLabel("待上传队列：检查中…", card)
+        self.queue_label = StrongBodyLabel("待上传订单：检查中…", card)
         inner.addWidget(self.queue_label)
 
         # 本次执行会不会从壳牌导出，直接写在脸上，不让用户猜
@@ -134,18 +149,30 @@ class AutoPage(QWidget):
         self.plan_label.setWordWrap(True)
         inner.addWidget(self.plan_label)
 
+        self.pending_file_combo = QComboBox(card)
+        self.pending_file_combo.setPlaceholderText("请选择待上传订单")
+        self.pending_file_combo.setEnabled(False)
+        self.pending_file_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        inner.addWidget(self.pending_file_combo)
+
         row = QHBoxLayout()
         row.setSpacing(12)
-        self.upload_btn = PrimaryPushButton("立即执行一次", card)
+        self.upload_btn = PrimaryPushButton("立即准备订单", card)
         self.upload_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_btn)
 
-        # 无视队列、强制从壳牌拉最新订单再跑一整条流水线
-        self.reexport_btn = PushButton("重新从壳牌导出", card)
+        self.preview_btn = PushButton("查看订单", card)
+        self.preview_btn.clicked.connect(self.show_order_preview)
+        row.addWidget(self.preview_btn)
+
+        self.reexport_btn = PushButton("重新导出壳牌订单", card)
         self.reexport_btn.clicked.connect(self.reexportRequested)
         row.addWidget(self.reexport_btn)
 
-        self.refresh_btn = PushButton("刷新队列", card)
+        self.refresh_btn = PushButton("刷新订单", card)
         self.refresh_btn.clicked.connect(self.refresh_queue)
         row.addWidget(self.refresh_btn)
         row.addStretch(1)
@@ -154,6 +181,43 @@ class AutoPage(QWidget):
         self.progress_bar = IndeterminateProgressBar(card)
         self.progress_bar.hide()
         inner.addWidget(self.progress_bar)
+
+        return card
+
+    def _build_pending_card(self) -> CardWidget:
+        card = CardWidget(self)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 16, 20, 16)
+        inner.setSpacing(12)
+
+        inner.addWidget(StrongBodyLabel("待上传订单", card))
+
+        self.pending_list = PlainTextEdit(card)
+        self.pending_list.setReadOnly(True)
+        self.pending_list.setMaximumBlockCount(80)
+        self.pending_list.setPlaceholderText("暂无待上传订单")
+        self.pending_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.pending_list.setMinimumHeight(120)
+        inner.addWidget(self.pending_list, 1)
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self.upload_pending_btn = PrimaryPushButton("上传", card)
+        self.upload_pending_btn.clicked.connect(self.uploadRequested)
+        row.addWidget(self.upload_pending_btn)
+
+        self.preview_file_btn = PushButton("查看订单", card)
+        self.preview_file_btn.clicked.connect(self.show_order_preview)
+        row.addWidget(self.preview_file_btn)
+
+        self.open_folder_btn = PushButton("打开文件夹", card)
+        self.open_folder_btn.clicked.connect(self._open_sdcc_folder)
+        row.addWidget(self.open_folder_btn)
+        row.addStretch(1)
+        inner.addLayout(row)
 
         return card
 
@@ -169,6 +233,11 @@ class AutoPage(QWidget):
         self.progress_text.setReadOnly(True)
         self.progress_text.setMaximumBlockCount(MAX_PROGRESS_LINES)
         self.progress_text.setPlaceholderText("还没有运行过任务")
+        self.progress_text.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.progress_text.setMinimumHeight(120)
         inner.addWidget(self.progress_text, 1)
 
         return card
@@ -187,32 +256,55 @@ class AutoPage(QWidget):
             self._suppress = False
 
     def refresh_queue(self) -> None:
-        pending = latest_pending()
-        if pending is None:
-            self.queue_label.setText("待上传队列：空")
+        files = pending_files()
+        self.pending_file_combo.blockSignals(True)
+        self.pending_file_combo.clear()
+        self.pending_file_combo.setEnabled(bool(files))
+        if not files:
+            self.queue_label.setText("待上传订单：暂无")
             self.plan_label.setText(
-                "📋 本次将【从壳牌导出】最新订单 → 转换 → 上传（待上传队列为空）"
+                "最近一次订单准备：等待从壳牌导出并转换为 SDCC 订单。"
             )
+            self.pending_list.setPlainText("暂无待上传订单")
+            self.pending_file_combo.addItem("暂无待上传订单")
+            self._selected_pending_path = None
         else:
-            stamp = datetime.fromtimestamp(pending.stat().st_mtime).strftime("%m-%d %H:%M")
-            self.queue_label.setText(f"待上传队列：{pending.name}（{stamp} 生成）")
+            latest = files[0]
+            self._selected_pending_path = str(latest)
+            for path in files:
+                label = f"{path.name}  |  {datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
+                self.pending_file_combo.addItem(label, str(path))
+                if str(path) == self._selected_pending_path:
+                    self.pending_file_combo.setCurrentIndex(self.pending_file_combo.count() - 1)
+            stamp = datetime.fromtimestamp(latest.stat().st_mtime).strftime("%m-%d %H:%M")
+            self.queue_label.setText(f"待上传订单：{len(files)} 个（最新：{latest.name}）")
             self.plan_label.setText(
-                f"📋 本次将【跳过导出】，直接上传：{pending.name}。"
-                "想拉最新的请点「重新从壳牌导出」"
+                "最近一次订单准备：已生成 SDCC 订单，等待人工登录上传。"
             )
-        # 流水线会自己导出，队列空也能执行，所以按钮始终可点
+            lines = []
+            for path in files[:12]:
+                mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                size_kb = max(1, path.stat().st_size // 1024)
+                lines.append(f"{path.name}\n{mtime}\n{size_kb} KB\n待上传")
+            self.pending_list.setPlainText("\n\n".join(lines))
+        self.pending_file_combo.blockSignals(False)
+
         self.upload_btn.setEnabled(True)
+        self.upload_pending_btn.setEnabled(bool(files))
+        self.preview_btn.setEnabled(bool(files))
+        self.preview_file_btn.setEnabled(bool(files))
 
     def set_next_run(self, next_run: Optional[datetime]) -> None:
         if next_run is None:
-            self.next_run_label.setText("自动上传未开启")
+            self.next_run_label.setText("自动准备未开启")
         else:
             self.next_run_label.setText(f"下次执行：{next_run:%Y-%m-%d %H:%M}")
 
     def set_running(self, running: bool) -> None:
         self.upload_btn.setEnabled(not running)
         self.reexport_btn.setEnabled(not running)
-        self.upload_btn.setText("执行中…" if running else "立即执行一次")
+        self.upload_pending_btn.setEnabled(not running and bool(pending_files()))
+        self.upload_btn.setText("准备中…" if running else "立即准备订单")
         self.progress_bar.setVisible(running)
         if running:
             self.progress_text.clear()
@@ -222,6 +314,36 @@ class AutoPage(QWidget):
         label = STEP_LABELS.get(step, step)
         stamp = datetime.now().strftime("%H:%M:%S")
         self.progress_text.appendPlainText(f"{stamp}  {icon} [{label}] {message}")
+
+    def show_order_preview(self) -> None:
+        path = self._selected_pending_path
+        if not path:
+            files = pending_files()
+            if not files:
+                return
+            path = str(files[0])
+        try:
+            dialog = OrderPreviewDialog(path, self)
+            dialog.exec()
+        except Exception:  # pragma: no cover
+            return
+
+    @property
+    def selected_pending_file(self):
+        if not getattr(self, "_selected_pending_path", None):
+            return None
+        return Path(self._selected_pending_path)
+
+    def _open_sdcc_folder(self) -> None:
+        folder = sdcc_orders_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            if os.name == "nt":
+                os.startfile(str(folder))
+            else:
+                os.system(f'open "{folder}"')
+        except Exception:  # pragma: no cover
+            pass
 
     # -------------------------------------------------------------- 内部
 

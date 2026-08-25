@@ -35,7 +35,7 @@ def _launch_command() -> str:
     if getattr(sys, "frozen", False):
         return f'"{Path(sys.executable)}" --minimized'
     entry = Path(__file__).resolve().parent.parent / "main.py"
-    return f'"{Path(sys.executable)}" "{entry}" ui --minimized'
+    return f'"{Path(sys.executable)}" "{entry}" --minimized'
 
 
 def is_enabled() -> bool:

@@ -822,30 +822,15 @@ def _close_dialog(
 def upload_file(
     file_path: PathLike,
     config,
-    password: str = "",
     logger=None,
     screenshot_dir: Optional[PathLike] = None,
     progress: ProgressCallback = None,
-    session_file: Optional[PathLike] = None,
-    interactive: bool = False,
 ) -> str:
+    """上传一个文件到 SDCC，返回结果文案。
+
+    登录方式：每次打开全新的浏览器，由用户手工完成登录。
+    不使用账号密码自动登录，不读取/保存 session。
     """
-    上传一个文件到 SDCC，返回结果文案。
-
-    登录方式：
-    每次打开全新的浏览器，由用户手工完成登录。
-    不使用账号密码自动登录。
-    不读取 session。
-    不保存 session。
-
-    password / session_file / interactive 暂时保留在参数中，
-    只是为了兼容现有调用方，实际不会使用。
-    """
-
-    # 兼容 scheduler.py 的旧调用参数。
-    _ = password
-    _ = session_file
-    _ = interactive
 
     path = Path(file_path)
 

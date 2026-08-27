@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from typing import Optional
 
-from .config import app_dir
+from .config import work_dir
 
 if sys.platform == "win32":
     import msvcrt
@@ -13,19 +14,30 @@ else:
 
 
 class FileLock:
-    """跨进程文件锁，默认非阻塞。"""
+    """跨进程文件锁，默认非阻塞。
+
+    同一线程可重入（深度计数）：upload_order 在 force_export 时会调
+    prepare_orders，两者都拿 upload_lock，不允许重入会自己把自己锁死。
+    """
 
     def __init__(self, name: str) -> None:
-        self.path = app_dir() / name
+        self.path = work_dir() / name
         self._handle = None
+        self._local = threading.local()
 
     @property
     def held(self) -> bool:
         return self._handle is not None
 
     def acquire(self, blocking: bool = False) -> bool:
-        if self._handle is not None:
+        # 同一线程重入：只加深度，不重复动 OS 锁
+        depth = getattr(self._local, "depth", 0)
+        if depth > 0:
+            self._local.depth = depth + 1
             return True
+        # 被同进程的其他线程持有
+        if self._handle is not None:
+            return False
 
         try:
             handle = open(self.path, "a+")
@@ -45,6 +57,7 @@ class FileLock:
             return False
 
         self._handle = handle
+        self._local.depth = 1
         self._write_pid()
         return True
 
@@ -61,6 +74,14 @@ class FileLock:
             pass
 
     def release(self) -> None:
+        depth = getattr(self._local, "depth", 0)
+        if depth > 1:
+            self._local.depth = depth - 1
+            return
+        if depth == 0 and self._handle is not None:
+            # 非持有线程的 release 直接忽略
+            return
+        self._local.depth = 0
         if self._handle is None:
             return
         try:

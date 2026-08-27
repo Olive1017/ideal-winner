@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread, Signal
 from core.converter import convert
 from core.models import ConvertError
 from services.config import Config
-from services.scheduler import run_pipeline_once
+from services.scheduler import upload_order
 
 
 class ConvertWorker(QThread):
@@ -63,13 +63,11 @@ class UploadWorker(QThread):
         def progress(step: str, status: str, message: str) -> None:
             self.progressed.emit(step, status, message)
 
-        # 人从界面/托盘点的「立即执行」，interactive=True：
-        # 没有可用会话时允许弹有头浏览器转人工登录，登完接着传
-        result = run_pipeline_once(
-            self.config,
+        # 人从界面/托盘点的「立即执行」：弹有头浏览器走人工登录，登完接着传
+        result = upload_order(
+            config=self.config,
             file_path=self.file_path,
             progress=progress,
-            interactive=True,
             force_export=self.force_export,
         )
         self.finishedResult.emit(result)

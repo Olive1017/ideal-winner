@@ -33,7 +33,7 @@ from qfluentwidgets import (
     TimeEdit,
 )
 
-from services.config import Config, pending_files, sdcc_orders_dir
+from services.config import Config, outbox_files, sdcc_orders_dir
 from ui.dialogs.order_preview_dialog import OrderPreviewDialog
 
 # 进度框最多保留的行数，再多就去日志页看
@@ -249,14 +249,14 @@ class AutoPage(QWidget):
         self._config = config
         self._suppress = True
         try:
-            self.enable_switch.setChecked(config.auto_upload_enabled)
+            self.enable_switch.setChecked(config.auto_prepare_enabled)
             hour, minute = config.schedule_hour_minute
             self.time_edit.setTime(QTime(hour, minute))
         finally:
             self._suppress = False
 
     def refresh_queue(self) -> None:
-        files = pending_files()
+        files = outbox_files()
         self.pending_file_combo.blockSignals(True)
         self.pending_file_combo.clear()
         self.pending_file_combo.setEnabled(bool(files))
@@ -303,7 +303,7 @@ class AutoPage(QWidget):
     def set_running(self, running: bool) -> None:
         self.upload_btn.setEnabled(not running)
         self.reexport_btn.setEnabled(not running)
-        self.upload_pending_btn.setEnabled(not running and bool(pending_files()))
+        self.upload_pending_btn.setEnabled(not running and bool(outbox_files()))
         self.upload_btn.setText("准备中…" if running else "立即准备订单")
         self.progress_bar.setVisible(running)
         if running:
@@ -318,7 +318,7 @@ class AutoPage(QWidget):
     def show_order_preview(self) -> None:
         path = self._selected_pending_path
         if not path:
-            files = pending_files()
+            files = outbox_files()
             if not files:
                 return
             path = str(files[0])

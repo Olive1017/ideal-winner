@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,70 +9,55 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from core.models import ConvertError, ErrorKind, UploadError, UploadResult, UploadStatus
+from core.models import ConvertError, UploadError, UploadResult, UploadStatus
 from core.uploader import upload_file
 
 from . import credentials
 from .config import (
     Config,
-    archive_pending,
-    clear_stale_pending,
-    latest_pending,
-    log_dir,
-    pending_dir,
+    archive_outbox,
+    clear_stale_outbox,
+    latest_outbox,
+    screenshot_dir,
     sdcc_file_name,
     sdcc_orders_dir,
-    shell_orders_dir,
 )
 from .logger import RunLogger, new_run_id
 from .single_instance import upload_lock
 
-JOB_ID_DAILY = "daily_upload"
-JOB_ID_RETRY_PREFIX = "retry_upload"
+JOB_ID_DAILY = "daily_prepare"
+JOB_ID_RETRY_PREFIX = "retry_prepare"
 
 PathLike = Union[str, Path]
 ProgressCallback = Optional[Callable[[str, str, str], None]]
 ResultCallback = Optional[Callable[[UploadResult], None]]
 
 
-def _copy_exported_shell_file(shell_file: PathLike) -> Path:
-    """把壳牌原始导出文件保存到显式的壳牌订单目录，以便用户直接查看。"""
-    source = Path(shell_file)
-    target_dir = shell_orders_dir()
-    target = target_dir / source.name
-    if target.exists():
-        unique_name = f"{source.stem}_{datetime.now():%Y%m%d_%H%M%S}{source.suffix}"
-        target = target_dir / unique_name
-    shutil.copy2(str(source), str(target))
-    return target
-
-
 def _export_and_convert(config: Config, logger, report) -> Path:
-    """导出壳牌订单 -> 保存原始文件 -> 转换 -> 保存 SDCC 文件 -> 返回 SDCC 文件路径。"""
+    """导出壳牌订单 -> 转换 -> 保存 SDCC 文件 -> 返回 SDCC 文件路径。"""
     from core.converter import convert
     from core.converter import export as export_xlsx
     from core.shell_exporter import export_orders
 
     report("export", "start", "从壳牌 LMS 导出订单")
-    shell_user = getattr(config, "shell_username", "") or ""
+    shell_user = config.shell_username
     shell_pwd = credentials.get_password(shell_user) if shell_user else ""
+    # 导出直接落 壳牌订单/，无需再复制一份
     shell_file = export_orders(
         config=config,
         logger=logger,
         password=shell_pwd or "",
         progress=report,
     )
-    saved_shell_file = _copy_exported_shell_file(shell_file)
-    report("export", "success", f"已保存原始壳牌订单：{saved_shell_file.name}")
+    report("export", "success", f"已保存原始壳牌订单：{shell_file.name}")
 
     report("convert", "start", "转换为 SDCC 导入格式")
-    car_file = getattr(config, "car_file", "") or None
+    car_file = config.car_file or None
     result = convert(shell_file, car_file)
     for warning in result.warnings:
         report("convert", "warn", warning)
 
-    target_dir = sdcc_orders_dir()
-    target = target_dir / sdcc_file_name(saved_shell_file.name)
+    target = sdcc_orders_dir() / sdcc_file_name(shell_file.name)
     export_xlsx(result.df, target)
     report(
         "convert",
@@ -117,7 +101,7 @@ def prepare_orders(
             report("queue", "info", "强制重新导出：忽略已有 SDCC 文件，从壳牌拉取最新订单")
             target = _export_and_convert(config, logger, report)
         else:
-            target = latest_pending()
+            target = latest_outbox()
             if target is None:
                 target = _export_and_convert(config, logger, report)
 
@@ -195,103 +179,86 @@ def upload_order(
             except Exception:  # noqa: BLE001
                 pass
 
-    target = Path(file_path) if file_path is not None else latest_pending()
-    if target is None and force_export:
-        prepared = prepare_orders(config=config, progress=progress, force_export=True)
-        if prepared.status is not UploadStatus.SUCCESS or not prepared.file_path:
-            return prepared
-        target = Path(prepared.file_path)
-    if target is None:
+    # 与定时任务互斥：两个浏览器同时登同一个 SDCC 账号会互踢。
+    # FileLock 同线程可重入，下面 force_export 分支调 prepare_orders 不会死锁。
+    if not upload_lock.acquire():
+        report("lock", "info", "已有任务在执行，本次跳过")
         return UploadResult(
             status=UploadStatus.SKIPPED,
-            message="没有可上传的 SDCC 文件",
+            message="已有任务在执行，本次跳过",
             run_id=logger.run_id,
-            duration_sec=time.monotonic() - started,
-        )
-    if not target.exists():
-        return UploadResult(
-            status=UploadStatus.SKIPPED,
-            message=f"文件不存在：{target}",
-            run_id=logger.run_id,
-            duration_sec=time.monotonic() - started,
         )
 
     try:
-        report("run", "start", f"开始上传：{target.name}")
-        message = upload_file(
-            file_path=target,
-            config=config,
-            password="",
-            logger=logger,
-            screenshot_dir=log_dir(),
-            progress=progress,
-            session_file=None,
-            interactive=True,
-        )
-        archived = archive_pending(target, success=True)
-        duration = time.monotonic() - started
-        report("run", "success", f"上传完成，耗时 {duration:.1f}s")
-        return UploadResult(
-            status=UploadStatus.SUCCESS,
-            message=message or "上传成功",
-            run_id=logger.run_id,
-            file_path=str(target),
-            archived_path=str(archived),
-            duration_sec=duration,
-        )
-    except UploadError as exc:
-        archived = archive_pending(target, success=False) if target.exists() and not exc.retryable else None
-        return UploadResult(
-            status=UploadStatus.FAILED,
-            message=exc.message,
-            run_id=logger.run_id,
-            file_path=str(target),
-            archived_path=str(archived) if archived else None,
-            detail=exc.detail,
-            screenshot=exc.detail if (exc.detail or "").endswith(".png") else None,
-            duration_sec=time.monotonic() - started,
-            retryable=exc.retryable,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return UploadResult(
-            status=UploadStatus.FAILED,
-            message=f"出现未预期错误：{exc}",
-            run_id=logger.run_id,
-            file_path=str(target),
-            duration_sec=time.monotonic() - started,
-            retryable=True,
-        )
+        target = Path(file_path) if file_path is not None else latest_outbox()
+        if target is None and force_export:
+            prepared = prepare_orders(config=config, progress=progress, force_export=True)
+            if prepared.status is not UploadStatus.SUCCESS or not prepared.file_path:
+                return prepared
+            target = Path(prepared.file_path)
+        if target is None:
+            return UploadResult(
+                status=UploadStatus.SKIPPED,
+                message="没有可上传的 SDCC 文件",
+                run_id=logger.run_id,
+                duration_sec=time.monotonic() - started,
+            )
+        if not target.exists():
+            return UploadResult(
+                status=UploadStatus.SKIPPED,
+                message=f"文件不存在：{target}",
+                run_id=logger.run_id,
+                duration_sec=time.monotonic() - started,
+            )
 
-
-def run_pipeline_once(
-    config: Optional[Config] = None,
-    run_id: Optional[str] = None,
-    attempt: int = 1,
-    file_path: Optional[PathLike] = None,
-    progress: ProgressCallback = None,
-    interactive: bool = False,
-    force_export: bool = False,
-) -> UploadResult:
-    """兼容旧接口：交互时走手动上传；非交互时走准备订单。"""
-    config = config or Config.load()
-    if interactive or file_path is not None:
-        return upload_order(
-            config=config,
-            file_path=file_path,
-            progress=progress,
-            force_export=force_export,
-        )
-    return prepare_orders(
-        config=config,
-        run_id=run_id,
-        attempt=attempt,
-        progress=progress,
-        force_export=force_export,
-    )
+        try:
+            report("run", "start", f"开始上传：{target.name}")
+            message = upload_file(
+                file_path=target,
+                config=config,
+                logger=logger,
+                screenshot_dir=screenshot_dir(),
+                progress=progress,
+            )
+            archived = archive_outbox(target, success=True)
+            duration = time.monotonic() - started
+            report("run", "success", f"上传完成，耗时 {duration:.1f}s")
+            return UploadResult(
+                status=UploadStatus.SUCCESS,
+                message=message or "上传成功",
+                run_id=logger.run_id,
+                file_path=str(target),
+                archived_path=str(archived),
+                duration_sec=duration,
+            )
+        except UploadError as exc:
+            archived = archive_outbox(target, success=False) if target.exists() and not exc.retryable else None
+            return UploadResult(
+                status=UploadStatus.FAILED,
+                message=exc.message,
+                run_id=logger.run_id,
+                file_path=str(target),
+                archived_path=str(archived) if archived else None,
+                detail=exc.detail,
+                screenshot=exc.detail if (exc.detail or "").endswith(".png") else None,
+                duration_sec=time.monotonic() - started,
+                retryable=exc.retryable,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return UploadResult(
+                status=UploadStatus.FAILED,
+                message=f"出现未预期错误：{exc}",
+                run_id=logger.run_id,
+                file_path=str(target),
+                duration_sec=time.monotonic() - started,
+                retryable=True,
+            )
+    finally:
+        upload_lock.release()
 
 
 class UploadScheduler:
-    """包一层 APScheduler，对外只暴露「开/关自动上传」和「立即跑一次」。"""
+    """包一层 APScheduler，对外只暴露「开/关自动准备」和「立即跑一次」。"""
 
     def __init__(
         self,
@@ -314,12 +281,12 @@ class UploadScheduler:
             self._scheduler.shutdown(wait=False)
 
     def apply_config(self, config: Config) -> None:
-        """配置变了就重建任务；关闭自动上传时一并取消掉排队中的重试。"""
+        """配置变了就重建任务；关闭自动准备时一并取消掉排队中的重试。"""
         self.config = config
         self._remove_job(JOB_ID_DAILY)
         self._clear_retries()
 
-        if not config.auto_upload_enabled:
+        if not config.auto_prepare_enabled:
             return
 
         hour, minute = config.schedule_hour_minute
@@ -359,7 +326,7 @@ class UploadScheduler:
 
     def _run_scheduled(self) -> None:
         self._clear_retries()
-        removed = clear_stale_pending()
+        removed = clear_stale_outbox()
         if removed and self.progress is not None:
             names = "、".join(p.name for p in removed)
             try:

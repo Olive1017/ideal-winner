@@ -123,7 +123,7 @@ class MainWindow(FluentWindow):
     # ------------------------------------------------------------ 事件
 
     def _on_schedule_changed(self, enabled: bool, schedule_time: str) -> None:
-        self.config.auto_upload_enabled = enabled
+        self.config.auto_prepare_enabled = enabled
         self.config.schedule_time = schedule_time
         self.config.save()
         self.scheduler.apply_config(self.config)

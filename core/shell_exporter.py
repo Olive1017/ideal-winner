@@ -36,13 +36,8 @@ PathLike = Union[str, Path]
 ProgressCallback = Optional[Callable[[str, str, str], None]]
 
 # --------------------------------------------------------------------------- #
-# 默认值 & 选择器
+# 选择器
 # --------------------------------------------------------------------------- #
-
-# 配置项可能还没加进 Config，这里全部用 getattr(config, ..., 默认) 兜底，
-# 保证在 config.py 改动落地之前，本文件就能独立跑起来测试。
-DEFAULT_LOGIN_URL = "https://lms.cnoocshell.com/"
-DEFAULT_REGION = "粤西粤北区域"
 
 # 登录页
 USERNAME_PLACEHOLDER = "请输入您的账号"
@@ -74,6 +69,7 @@ DOWNLOAD_TIMEOUT_MS = 120_000
 REGION_DROPBTN_SELECTOR = "[id$='QCityGroup_dropbtn']"
 REGION_DROPVIEW_SELECTOR = "[id$='QCityGroup_dropview']"
 
+
 def _noop(step: str, status: str, msg: str) -> None:
     pass
 
@@ -81,16 +77,6 @@ def _noop(step: str, status: str, msg: str) -> None:
 # --------------------------------------------------------------------------- #
 # 辅助
 # --------------------------------------------------------------------------- #
-
-
-def _download_dir() -> Path:
-    """导出的源文件存这里。放在用户配置目录下的 downloads/，
-    和 pending/、archive/ 平级；后续可搬进 services.config 做成 download_dir()。"""
-    from services.config import app_dir
-
-    path = app_dir() / "downloads"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _tomorrow(fmt: str = DATE_FORMAT) -> str:
@@ -103,8 +89,8 @@ def _tomorrow(fmt: str = DATE_FORMAT) -> str:
 
 
 def _login(page, config, password: str, logger, report) -> None:
-    login_url = getattr(config, "shell_login_url", "") or DEFAULT_LOGIN_URL
-    username = getattr(config, "shell_username", "") or ""
+    login_url = config.shell_login_url
+    username = config.shell_username
     if not username or not password:
         raise UploadError(
             "壳牌 LMS 没有账号或密码，请先到「设置」里录入壳牌账号密码",
@@ -203,7 +189,6 @@ def _set_plan_dates(page, logger) -> None:
 
 
 def _select_region(page, region: str, logger) -> None:
-    
     """在运输区域下拉控件里勾选目标区域。
 
     控件是 ui-dict：一个 readonly 输入框 + 箭头，点箭头展开面板。面板里：
@@ -256,6 +241,7 @@ def _select_region(page, region: str, logger) -> None:
     dropview.locator(".sure").first.click()
     logger.success("navigate", f"已选择区域：{region}")
 
+
 def _click_query(page, logger) -> None:
     """点「查询」刷新列表。导出前必须先查询，否则导的是空/旧数据。
 
@@ -296,6 +282,7 @@ def _trigger_export(page, target: Path, logger, report) -> Path:
     report("export", "success", f"导出完成：{target.name}")
     return target
 
+
 # --------------------------------------------------------------------------- #
 # 对外入口
 # --------------------------------------------------------------------------- #
@@ -317,14 +304,14 @@ def export_orders(
     这个函数只做「导出拿文件」，转换/上传由各自的模块接手。
     """
     # 延迟导入，避免和 services 之间的循环依赖
-    from services.config import Config
+    from services.config import Config, shell_orders_dir
     from services.logger import RunLogger
 
     config = config or Config.load()
     logger = logger or RunLogger(run_id=run_id)
     report = progress or _noop
 
-    username = getattr(config, "shell_username", "") or ""
+    username = config.shell_username
     if not password:
         try:
             from services import credentials
@@ -333,22 +320,22 @@ def export_orders(
         except Exception:  # noqa: BLE001 - 取不到就当空，交给 _login 报错
             password = ""
 
-    target = _download_dir() / f"{EXPORT_PREFIX}_{datetime.now():%Y%m%d}.xlsx"
+    # 导出直接落到 壳牌订单/，用户可直接查看，无需再复制
+    target = shell_orders_dir() / f"{EXPORT_PREFIX}_{datetime.now():%Y%m%d}.xlsx"
 
     report("browser", "start", "启动浏览器")
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, config, logger, headless=headless)
         # 导出要接收下载，必须开 accept_downloads
         context = browser.new_context(accept_downloads=True)
-        context.set_default_timeout(getattr(config, "timeout_ms", 100_000))
+        context.set_default_timeout(config.timeout_ms)
         page = context.new_page()
         try:
             _login(page, config, password, logger, report)
             list_page = _open_shipment_list(page, logger, report)
             _set_plan_dates(list_page, logger)
-            region = getattr(config, "export_region", "") or DEFAULT_REGION
-            _select_region(list_page, region, logger)
-            _click_query(list_page, logger)  
+            _select_region(list_page, config.export_region, logger)
+            _click_query(list_page, logger)
             result = _trigger_export(list_page, target, logger, report)
             return result
         except UploadError:
@@ -378,7 +365,7 @@ if __name__ == "__main__":
     from services.logger import RunLogger
 
     cfg = Config.load()
-    if not getattr(cfg, "shell_username", ""):
+    if not cfg.shell_username:
         cfg.shell_username = input("壳牌 LMS 账号：").strip()
 
     pwd = ""

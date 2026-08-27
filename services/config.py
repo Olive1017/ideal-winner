@@ -12,8 +12,6 @@ from typing import List, Optional, Tuple, Union
 APP_NAME = "SDCC订单工具"
 CONFIG_FILENAME = "config.json"
 
-# 新流程不再使用固定 pending/ 目录以及 session.json；保留兼容字段，避免旧调用直接报错。
-UPLOAD_FILENAME = "SDCC导入版.xlsx"
 EXCEL_SUFFIXES = {".xlsx", ".xls"}
 
 DEFAULT_LOGIN_URL = "https://tms.i.sinotrans.com/sdccweb/manage/"
@@ -39,11 +37,6 @@ def work_dir() -> Path:
     return path
 
 
-def app_dir() -> Path:
-    """兼容旧调用：本项目已统一使用工作目录。"""
-    return work_dir()
-
-
 def config_path() -> Path:
     return work_dir() / CONFIG_FILENAME
 
@@ -60,7 +53,7 @@ def shell_orders_dir() -> Path:
 
 
 def sdcc_orders_dir() -> Path:
-    """转换后的 SDCC 文件目录。"""
+    """转换后的 SDCC 文件目录，即待上传队列。"""
     return _sub_dir("SDCC订单")
 
 
@@ -75,16 +68,6 @@ def log_dir() -> Path:
 
 def screenshot_dir() -> Path:
     return _sub_dir("截图")
-
-
-def pending_dir() -> Path:
-    """兼容旧命名：现在指向 SDCC订单/。"""
-    return sdcc_orders_dir()
-
-
-def download_dir() -> Path:
-    """兼容旧命名：原始壳牌导出目录。"""
-    return shell_orders_dir()
 
 
 def resource_path(relative: str) -> Path:
@@ -106,16 +89,16 @@ def sdcc_file_name(source_name: Optional[str] = None) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 兼容旧调用：旧 pending/ 目录依赖保留，但不再作为核心业务目录
+# 待上传队列：SDCC订单/ 目录下的 Excel，文件即状态
 # --------------------------------------------------------------------------- #
 
 
-def pending_files() -> List[Path]:
+def outbox_files() -> List[Path]:
     """返回 SDCC订单/ 下的 Excel，按修改时间倒序。"""
     try:
         entries = [
             p
-            for p in pending_dir().iterdir()
+            for p in sdcc_orders_dir().iterdir()
             if p.is_file() and p.suffix.lower() in EXCEL_SUFFIXES
         ]
     except OSError:
@@ -123,39 +106,19 @@ def pending_files() -> List[Path]:
     return sorted(entries, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def latest_pending() -> Optional[Path]:
-    """取最新的一个 SDCC 文件。"""
-    files = pending_files()
+def latest_outbox() -> Optional[Path]:
+    """取最新的一个待上传 SDCC 文件。"""
+    files = outbox_files()
     return files[0] if files else None
 
 
-def put_pending(source: PathLike, filename: str = "") -> Path:
-    """兼容旧接口：将转换结果写入 SDCC订单/，默认创建带时间戳的文件名。"""
-    target_dir = pending_dir()
-    target_name = filename or sdcc_file_name(str(source))
-    target = target_dir / target_name
-    shutil.copyfile(str(source), str(target))
-    return target
-
-
-def clear_pending() -> int:
-    removed = 0
-    for path in pending_files():
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            continue
-    return removed
-
-
-def clear_stale_pending() -> List[Path]:
+def clear_stale_outbox() -> List[Path]:
     """清理比今天更早的 SDCC 文件，避免旧文件被重新当成待上传候选。"""
     from datetime import date
 
     removed: List[Path] = []
     today = date.today()
-    for path in pending_files():
+    for path in outbox_files():
         try:
             mtime = date.fromtimestamp(path.stat().st_mtime)
         except OSError:
@@ -169,8 +132,8 @@ def clear_stale_pending() -> List[Path]:
     return removed
 
 
-def archive_pending(file_path: PathLike, success: bool) -> Path:
-    """归档 SDCC 订单文件到 archive/YYYY-MM-DD/。"""
+def archive_outbox(file_path: PathLike, success: bool) -> Path:
+    """归档 SDCC 订单文件到 归档/YYYY-MM-DD/。"""
     source = Path(file_path)
     now = datetime.now()
     day_dir = archive_dir() / now.strftime("%Y-%m-%d")
@@ -202,8 +165,8 @@ class Config:
     export_region: str = DEFAULT_EXPORT_REGION
     car_file: str = ""  # 车型映射表路径；相对稳定，配一次即可
 
-    # 自动上传
-    auto_upload_enabled: bool = False
+    # 自动准备（每天定时导出+转换，不自动上传 SDCC）
+    auto_prepare_enabled: bool = False
     schedule_time: str = "18:30"  # HH:MM，24 小时制
     retry_delays_minutes: List[int] = field(default_factory=lambda: [5, 15, 30])
 
@@ -230,6 +193,9 @@ class Config:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return cls()
+        # 旧配置键迁移：auto_upload_enabled → auto_prepare_enabled
+        if "auto_upload_enabled" in raw:
+            raw.setdefault("auto_prepare_enabled", raw.pop("auto_upload_enabled"))
         known = {f.name for f in fields(cls)}
         overrides = {k: v for k, v in raw.items() if k in known}
         return cls(**overrides)

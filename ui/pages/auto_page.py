@@ -11,10 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QTime, Signal
+from PySide6.QtCore import Qt, QTime, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -62,8 +64,8 @@ STATUS_ICONS = {
 }
 
 
-class AutoPage(QWidget):
-    """运行页。"""
+class AutoPage(QScrollArea):
+    """运行页。内容超出窗口高度时可滚动——窗口矮了不再把卡片和按钮压扁。"""
 
     settingsChanged = Signal(bool, str)  # enabled, "HH:MM"
     uploadRequested = Signal()
@@ -72,10 +74,26 @@ class AutoPage(QWidget):
     def __init__(self, config: Config, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("autoPage")
+
+        # 只增加滚动能力，不改变原来的页面布局（和设置页同款处理）
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
         self._config = config
         self._suppress = False  # 程序回写控件时不要反向触发信号
+
+        self._content = QWidget()
+        self.setWidget(self._content)
+
         self._build_ui()
         self.load_config(config)
+        self.refresh_queue()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """每次切到这个页面都重新扫一遍文件夹，替代原来的「刷新订单」按钮。"""
+        super().showEvent(event)
         self.refresh_queue()
 
     # ------------------------------------------------------------------ UI
@@ -89,18 +107,18 @@ class AutoPage(QWidget):
         return button
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout(self._content)
         layout.setContentsMargins(28, 20, 28, 20)
         layout.setSpacing(16)
 
-        layout.addWidget(SubtitleLabel("订单处理", self))
+        layout.addWidget(SubtitleLabel("订单处理", self._content))
         layout.addWidget(self._build_switch_card())
         layout.addWidget(self._build_status_card())
         layout.addWidget(self._build_pending_card())
         layout.addWidget(self._build_progress_card(), 1)
 
     def _build_switch_card(self) -> CardWidget:
-        card = CardWidget(self)
+        card = CardWidget(self._content)
         inner = QVBoxLayout(card)
         inner.setContentsMargins(20, 16, 20, 16)
         inner.setSpacing(14)
@@ -144,7 +162,7 @@ class AutoPage(QWidget):
         return card
 
     def _build_status_card(self) -> CardWidget:
-        card = CardWidget(self)
+        card = CardWidget(self._content)
         inner = QVBoxLayout(card)
         inner.setContentsMargins(20, 16, 20, 16)
         inner.setSpacing(12)
@@ -179,10 +197,6 @@ class AutoPage(QWidget):
         self.reexport_btn = self._btn(PushButton("重新导出壳牌订单", card), 150)
         self.reexport_btn.clicked.connect(self.reexportRequested)
         row.addWidget(self.reexport_btn)
-
-        self.refresh_btn = self._btn(PushButton("刷新订单", card), 90)
-        self.refresh_btn.clicked.connect(self.refresh_queue)
-        row.addWidget(self.refresh_btn)
         row.addStretch(1)
         inner.addLayout(row)
 
@@ -193,7 +207,7 @@ class AutoPage(QWidget):
         return card
 
     def _build_pending_card(self) -> CardWidget:
-        card = CardWidget(self)
+        card = CardWidget(self._content)
         inner = QVBoxLayout(card)
         inner.setContentsMargins(20, 16, 20, 16)
         inner.setSpacing(12)
@@ -234,7 +248,7 @@ class AutoPage(QWidget):
         return card
 
     def _build_progress_card(self) -> CardWidget:
-        card = CardWidget(self)
+        card = CardWidget(self._content)
         inner = QVBoxLayout(card)
         inner.setContentsMargins(20, 14, 20, 16)
         inner.setSpacing(8)

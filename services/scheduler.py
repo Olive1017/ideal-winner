@@ -166,7 +166,10 @@ def upload_order(
     progress: ProgressCallback = None,
     force_export: bool = False,
 ) -> UploadResult:
-    """手动上传：找一个已生成的 SDCC 文件，调用 uploader.py，交由用户手工登录。"""
+    """手动上传：指定文件 / 队列最新文件直接传；强制重导或队列为空时先「导出→转换」。
+
+    上传段调用 uploader.py，交由用户手工登录。
+    """
     config = config or Config.load()
     logger = RunLogger(new_run_id())
     started = time.monotonic()
@@ -180,7 +183,7 @@ def upload_order(
                 pass
 
     # 与定时任务互斥：两个浏览器同时登同一个 SDCC 账号会互踢。
-    # FileLock 同线程可重入，下面 force_export 分支调 prepare_orders 不会死锁。
+    # FileLock 同线程可重入，下面调 prepare_orders 不会死锁。
     if not upload_lock.acquire():
         report("lock", "info", "已有任务在执行，本次跳过")
         return UploadResult(
@@ -190,12 +193,18 @@ def upload_order(
         )
 
     try:
-        target = Path(file_path) if file_path is not None else latest_outbox()
-        if target is None and force_export:
-            prepared = prepare_orders(config=config, progress=progress, force_export=True)
+        target: Optional[Path] = Path(file_path) if file_path is not None else None
+        # 强制重新导出不看队列；队列为空时「立即准备订单」也要真的去导出，
+        # 否则按钮名不副实——点了什么都没有发生
+        if target is None and (force_export or latest_outbox() is None):
+            prepared = prepare_orders(
+                config=config, progress=progress, force_export=force_export
+            )
             if prepared.status is not UploadStatus.SUCCESS or not prepared.file_path:
                 return prepared
             target = Path(prepared.file_path)
+        if target is None:
+            target = latest_outbox()
         if target is None:
             return UploadResult(
                 status=UploadStatus.SKIPPED,

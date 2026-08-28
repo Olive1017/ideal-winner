@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import (
@@ -247,6 +247,11 @@ class MainWindow(FluentWindow):
 
 def run_app(start_minimized: bool = False) -> int:
     """启动 Qt 应用。"""
+    # Windows 125%/150% 这类分数缩放下，Qt 默认的 PassThrough 取整会让控件
+    # 尺寸和字体对不上，按钮被压扁、文字裁切；Round 让整体按整数倍缩放
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.Round
+    )
     app = QApplication(sys.argv)
     # 关窗口不退出进程，否则收到托盘后会被 Qt 直接干掉
     app.setQuitOnLastWindowClosed(False)

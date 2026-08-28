@@ -33,7 +33,7 @@ from qfluentwidgets import (
     TimeEdit,
 )
 
-from services.config import Config, outbox_files, sdcc_orders_dir
+from services.config import Config, outbox_files, sdcc_orders_dir, shell_orders_dir
 from ui.dialogs.order_preview_dialog import OrderPreviewDialog
 
 # 进度框最多保留的行数，再多就去日志页看
@@ -79,6 +79,14 @@ class AutoPage(QWidget):
         self.refresh_queue()
 
     # ------------------------------------------------------------------ UI
+
+    @staticmethod
+    def _btn(button, min_width: int = 0):
+        """统一按钮尺寸：不给最小尺寸时，Fluent 按钮在部分 Windows 缩放下会被压扁、文字裁切。"""
+        button.setMinimumHeight(36)
+        if min_width:
+            button.setMinimumWidth(min_width)
+        return button
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -160,19 +168,19 @@ class AutoPage(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(12)
-        self.upload_btn = PrimaryPushButton("立即准备订单", card)
+        self.upload_btn = self._btn(PrimaryPushButton("立即准备订单", card), 130)
         self.upload_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_btn)
 
-        self.preview_btn = PushButton("查看订单", card)
+        self.preview_btn = self._btn(PushButton("查看订单", card), 90)
         self.preview_btn.clicked.connect(self.show_order_preview)
         row.addWidget(self.preview_btn)
 
-        self.reexport_btn = PushButton("重新导出壳牌订单", card)
+        self.reexport_btn = self._btn(PushButton("重新导出壳牌订单", card), 150)
         self.reexport_btn.clicked.connect(self.reexportRequested)
         row.addWidget(self.reexport_btn)
 
-        self.refresh_btn = PushButton("刷新订单", card)
+        self.refresh_btn = self._btn(PushButton("刷新订单", card), 90)
         self.refresh_btn.clicked.connect(self.refresh_queue)
         row.addWidget(self.refresh_btn)
         row.addStretch(1)
@@ -205,17 +213,21 @@ class AutoPage(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(12)
-        self.upload_pending_btn = PrimaryPushButton("上传", card)
+        self.upload_pending_btn = self._btn(PrimaryPushButton("上传", card), 90)
         self.upload_pending_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_pending_btn)
 
-        self.preview_file_btn = PushButton("查看订单", card)
+        self.preview_file_btn = self._btn(PushButton("查看订单", card), 90)
         self.preview_file_btn.clicked.connect(self.show_order_preview)
         row.addWidget(self.preview_file_btn)
 
-        self.open_folder_btn = PushButton("打开文件夹", card)
+        self.open_folder_btn = self._btn(PushButton("打开SDCC订单", card), 130)
         self.open_folder_btn.clicked.connect(self._open_sdcc_folder)
         row.addWidget(self.open_folder_btn)
+
+        self.open_shell_folder_btn = self._btn(PushButton("打开壳牌订单", card), 130)
+        self.open_shell_folder_btn.clicked.connect(self._open_shell_folder)
+        row.addWidget(self.open_shell_folder_btn)
         row.addStretch(1)
         inner.addLayout(row)
 
@@ -335,7 +347,13 @@ class AutoPage(QWidget):
         return Path(self._selected_pending_path)
 
     def _open_sdcc_folder(self) -> None:
-        folder = sdcc_orders_dir()
+        self._open_folder(sdcc_orders_dir())
+
+    def _open_shell_folder(self) -> None:
+        self._open_folder(shell_orders_dir())
+
+    @staticmethod
+    def _open_folder(folder: Path) -> None:
         folder.mkdir(parents=True, exist_ok=True)
         try:
             if os.name == "nt":

@@ -11,7 +11,7 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from core.converter import convert
-from core.models import ConvertError
+from core.models import ConvertError, UploadResult, UploadStatus
 from services.config import Config
 from services.scheduler import upload_order
 
@@ -63,11 +63,19 @@ class UploadWorker(QThread):
         def progress(step: str, status: str, message: str) -> None:
             self.progressed.emit(step, status, message)
 
-        # 人从界面/托盘点的「立即执行」：弹有头浏览器走人工登录，登完接着传
-        result = upload_order(
-            config=self.config,
-            file_path=self.file_path,
-            progress=progress,
-            force_export=self.force_export,
-        )
+        try:
+            # 人从界面/托盘点的「立即执行」：弹有头浏览器走人工登录，登完接着传
+            result = upload_order(
+                config=self.config,
+                file_path=self.file_path,
+                progress=progress,
+                force_export=self.force_export,
+            )
+        except Exception as exc:  # noqa: BLE001 - 兜底：异常也必须回信号，
+            # 否则 finishedResult 永远不发，UI 按钮会一直停在「运行中」置灰状态
+            result = UploadResult(
+                status=UploadStatus.FAILED,
+                message=f"任务出现未预期错误：{exc}",
+                retryable=False,
+            )
         self.finishedResult.emit(result)

@@ -10,6 +10,7 @@ Qt 会自动用队列连接把它派回主线程——直接改控件会随机�
 from __future__ import annotations
 
 import sys
+from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
@@ -109,6 +110,7 @@ class MainWindow(FluentWindow):
         self.auto_page.settingsChanged.connect(self._on_schedule_changed)
         self.auto_page.uploadRequested.connect(self._start_manual_upload)
         self.auto_page.reexportRequested.connect(self._start_reexport)
+        self.auto_page.uploadFileRequested.connect(self._start_file_upload)
 
         self.settings_page.configSaved.connect(self._on_config_saved)
 
@@ -146,14 +148,20 @@ class MainWindow(FluentWindow):
     # ---------------------------------------------------------- 手动执行
 
     def _start_manual_upload(self) -> None:
-        """立即执行一次：按队列优先级取文件（队列空才自动导出）。"""
+        """开始处理：队列有最新文件就直接传，队列空则走 导出→转换→上传 一条龙。"""
         self._start_worker(force_export=False)
 
     def _start_reexport(self) -> None:
-        """重新从壳牌导出：无视队列，强制拉最新订单再跑整条流水线。"""
+        """强制拉最新：无视队列，重新从壳牌导出再跑整条流水线。"""
         self._start_worker(force_export=True)
 
-    def _start_worker(self, force_export: bool = False) -> None:
+    def _start_file_upload(self, file_path: str) -> None:
+        """上传待上传列表里指定的某一份文件（行内「上传」按钮触发）。"""
+        self._start_worker(file_path=file_path)
+
+    def _start_worker(
+        self, force_export: bool = False, file_path: Optional[str] = None
+    ) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._info("已经有一个任务在跑了")
             return
@@ -162,7 +170,9 @@ class MainWindow(FluentWindow):
         if self.tray is not None:
             self.tray.set_state("busy")
 
-        self._worker = UploadWorker(self.config, force_export=force_export, parent=self)
+        self._worker = UploadWorker(
+            self.config, file_path=file_path, force_export=force_export, parent=self
+        )
         self._worker.progressed.connect(self._on_progress)
         self._worker.finishedResult.connect(self._on_upload_result)
         self._worker.start()

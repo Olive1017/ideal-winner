@@ -1,4 +1,4 @@
-"""运行页：自动上传开关、时间、队列状态、实时进度。
+"""运行页：自动准备开关、时间、队列状态、实时进度。
 
 页面本身不持有调度器，只发信号；调度器由主窗口统一管理，
 避免关窗口后调度器跟着死掉。
@@ -9,11 +9,10 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTime, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QScrollArea,
@@ -40,6 +39,8 @@ from ui.dialogs.order_preview_dialog import OrderPreviewDialog
 
 # 进度框最多保留的行数，再多就去日志页看
 MAX_PROGRESS_LINES = 200
+# 待上传列表最多展示的文件数，更多去文件夹里看
+MAX_PENDING_ROWS = 12
 
 STEP_LABELS = {
     "queue": "队列",
@@ -68,8 +69,9 @@ class AutoPage(QScrollArea):
     """运行页。内容超出窗口高度时可滚动——窗口矮了不再把卡片和按钮压扁。"""
 
     settingsChanged = Signal(bool, str)  # enabled, "HH:MM"
-    uploadRequested = Signal()
-    reexportRequested = Signal()
+    uploadRequested = Signal()  # 开始处理：队列最新直接传，队列空则一条龙
+    reexportRequested = Signal()  # 强制拉最新：无视队列重新导出
+    uploadFileRequested = Signal(str)  # 上传待上传列表里指定的某一份
 
     def __init__(self, config: Config, parent=None) -> None:
         super().__init__(parent)
@@ -83,6 +85,7 @@ class AutoPage(QScrollArea):
 
         self._config = config
         self._suppress = False  # 程序回写控件时不要反向触发信号
+        self._row_upload_btns: List[PushButton] = []
 
         self._content = QWidget()
         self.setWidget(self._content)
@@ -170,31 +173,18 @@ class AutoPage(QScrollArea):
         self.queue_label = StrongBodyLabel("待上传订单：检查中…", card)
         inner.addWidget(self.queue_label)
 
-        # 本次执行会不会从壳牌导出，直接写在脸上，不让用户猜
+        # 点了按钮会发生什么，直接写在脸上，不让用户猜
         self.plan_label = CaptionLabel("", card)
         self.plan_label.setWordWrap(True)
         inner.addWidget(self.plan_label)
 
-        self.pending_file_combo = QComboBox(card)
-        self.pending_file_combo.setPlaceholderText("请选择待上传订单")
-        self.pending_file_combo.setEnabled(False)
-        self.pending_file_combo.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        inner.addWidget(self.pending_file_combo)
-
         row = QHBoxLayout()
         row.setSpacing(12)
-        self.upload_btn = self._btn(PrimaryPushButton("立即准备订单", card), 130)
+        self.upload_btn = self._btn(PrimaryPushButton("开始处理", card), 120)
         self.upload_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_btn)
 
-        self.preview_btn = self._btn(PushButton("查看订单", card), 90)
-        self.preview_btn.clicked.connect(self.show_order_preview)
-        row.addWidget(self.preview_btn)
-
-        self.reexport_btn = self._btn(PushButton("重新导出壳牌订单", card), 150)
+        self.reexport_btn = self._btn(PushButton("强制拉最新", card), 120)
         self.reexport_btn.clicked.connect(self.reexportRequested)
         row.addWidget(self.reexport_btn)
         row.addStretch(1)
@@ -210,31 +200,19 @@ class AutoPage(QScrollArea):
         card = CardWidget(self._content)
         inner = QVBoxLayout(card)
         inner.setContentsMargins(20, 16, 20, 16)
-        inner.setSpacing(12)
+        inner.setSpacing(8)
 
         inner.addWidget(StrongBodyLabel("待上传订单", card))
 
-        self.pending_list = PlainTextEdit(card)
-        self.pending_list.setReadOnly(True)
-        self.pending_list.setMaximumBlockCount(80)
-        self.pending_list.setPlaceholderText("暂无待上传订单")
-        self.pending_list.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
-        self.pending_list.setMinimumHeight(120)
-        inner.addWidget(self.pending_list, 1)
+        # 文件行都放进这个容器，refresh_queue 每次重建
+        self.pending_rows = QWidget(card)
+        self.pending_rows_layout = QVBoxLayout(self.pending_rows)
+        self.pending_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.pending_rows_layout.setSpacing(6)
+        inner.addWidget(self.pending_rows)
 
         row = QHBoxLayout()
         row.setSpacing(12)
-        self.upload_pending_btn = self._btn(PrimaryPushButton("上传", card), 90)
-        self.upload_pending_btn.clicked.connect(self.uploadRequested)
-        row.addWidget(self.upload_pending_btn)
-
-        self.preview_file_btn = self._btn(PushButton("查看订单", card), 90)
-        self.preview_file_btn.clicked.connect(self.show_order_preview)
-        row.addWidget(self.preview_file_btn)
-
         self.open_folder_btn = self._btn(PushButton("打开SDCC订单", card), 130)
         self.open_folder_btn.clicked.connect(self._open_sdcc_folder)
         row.addWidget(self.open_folder_btn)
@@ -246,6 +224,40 @@ class AutoPage(QScrollArea):
         inner.addLayout(row)
 
         return card
+
+    def _build_pending_row(self, path: Path) -> QWidget:
+        """待上传列表的一行：文件名 + 时间/大小 + 行内「上传」「查看」按钮。"""
+        row_widget = QWidget(self.pending_rows)
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addWidget(BodyLabel(path.name, row_widget))
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        size_kb = max(1, path.stat().st_size // 1024)
+        text.addWidget(CaptionLabel(f"{mtime} · {size_kb} KB · 待上传", row_widget))
+        row.addLayout(text, 1)
+
+        upload_btn = PushButton("上传", row_widget)
+        upload_btn.setMinimumHeight(30)
+        upload_btn.setMinimumWidth(70)
+        upload_btn.clicked.connect(
+            lambda _checked=False, p=str(path): self.uploadFileRequested.emit(p)
+        )
+        self._row_upload_btns.append(upload_btn)
+        row.addWidget(upload_btn)
+
+        preview_btn = PushButton("查看", row_widget)
+        preview_btn.setMinimumHeight(30)
+        preview_btn.setMinimumWidth(70)
+        preview_btn.clicked.connect(
+            lambda _checked=False, p=str(path): self.show_order_preview(p)
+        )
+        row.addWidget(preview_btn)
+
+        return row_widget
 
     def _build_progress_card(self) -> CardWidget:
         card = CardWidget(self._content)
@@ -283,42 +295,33 @@ class AutoPage(QScrollArea):
 
     def refresh_queue(self) -> None:
         files = outbox_files()
-        self.pending_file_combo.blockSignals(True)
-        self.pending_file_combo.clear()
-        self.pending_file_combo.setEnabled(bool(files))
+
+        # 重建待上传列表的行
+        while self.pending_rows_layout.count():
+            item = self.pending_rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._row_upload_btns.clear()
+
         if not files:
             self.queue_label.setText("待上传订单：暂无")
             self.plan_label.setText(
-                "最近一次订单准备：等待从壳牌导出并转换为 SDCC 订单。"
+                "点「开始处理」会从壳牌导出订单、转换成 SDCC 格式后再上传，一条龙。"
             )
-            self.pending_list.setPlainText("暂无待上传订单")
-            self.pending_file_combo.addItem("暂无待上传订单")
-            self._selected_pending_path = None
+            self.pending_rows_layout.addWidget(
+                CaptionLabel("暂无待上传订单", self.pending_rows)
+            )
         else:
             latest = files[0]
-            self._selected_pending_path = str(latest)
-            for path in files:
-                label = f"{path.name}  |  {datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
-                self.pending_file_combo.addItem(label, str(path))
-                if str(path) == self._selected_pending_path:
-                    self.pending_file_combo.setCurrentIndex(self.pending_file_combo.count() - 1)
-            stamp = datetime.fromtimestamp(latest.stat().st_mtime).strftime("%m-%d %H:%M")
             self.queue_label.setText(f"待上传订单：{len(files)} 个（最新：{latest.name}）")
             self.plan_label.setText(
-                "最近一次订单准备：已生成 SDCC 订单，等待人工登录上传。"
+                "点「开始处理」直接上传最新一份；不信任队列就点「强制拉最新」重新导出。"
             )
-            lines = []
-            for path in files[:12]:
-                mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-                size_kb = max(1, path.stat().st_size // 1024)
-                lines.append(f"{path.name}\n{mtime}\n{size_kb} KB\n待上传")
-            self.pending_list.setPlainText("\n\n".join(lines))
-        self.pending_file_combo.blockSignals(False)
+            for path in files[:MAX_PENDING_ROWS]:
+                self.pending_rows_layout.addWidget(self._build_pending_row(path))
 
         self.upload_btn.setEnabled(True)
-        self.upload_pending_btn.setEnabled(bool(files))
-        self.preview_btn.setEnabled(bool(files))
-        self.preview_file_btn.setEnabled(bool(files))
 
     def set_next_run(self, next_run: Optional[datetime]) -> None:
         if next_run is None:
@@ -329,8 +332,9 @@ class AutoPage(QScrollArea):
     def set_running(self, running: bool) -> None:
         self.upload_btn.setEnabled(not running)
         self.reexport_btn.setEnabled(not running)
-        self.upload_pending_btn.setEnabled(not running and bool(outbox_files()))
-        self.upload_btn.setText("准备中…" if running else "立即准备订单")
+        for btn in self._row_upload_btns:
+            btn.setEnabled(not running)
+        self.upload_btn.setText("处理中…" if running else "开始处理")
         self.progress_bar.setVisible(running)
         if running:
             self.progress_text.clear()
@@ -341,8 +345,8 @@ class AutoPage(QScrollArea):
         stamp = datetime.now().strftime("%H:%M:%S")
         self.progress_text.appendPlainText(f"{stamp}  {icon} [{label}] {message}")
 
-    def show_order_preview(self) -> None:
-        path = self._selected_pending_path
+    def show_order_preview(self, path: Optional[str] = None) -> None:
+        """预览订单文件；不传路径时看最新一份。"""
         if not path:
             files = outbox_files()
             if not files:
@@ -353,12 +357,6 @@ class AutoPage(QScrollArea):
             dialog.exec()
         except Exception:  # pragma: no cover
             return
-
-    @property
-    def selected_pending_file(self):
-        if not getattr(self, "_selected_pending_path", None):
-            return None
-        return Path(self._selected_pending_path)
 
     def _open_sdcc_folder(self) -> None:
         self._open_folder(sdcc_orders_dir())

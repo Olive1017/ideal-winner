@@ -149,8 +149,7 @@ class AutoPage(QScrollArea):
 
         inner.addWidget(
             CaptionLabel(
-                "壳牌订单、转换结果和归档都会放进这个文件夹，车型表也建议放这里。"
-                "别选 OneDrive/坚果云等同步盘，文件锁和 Excel 读写容易出怪问题",
+                "壳牌订单、转换结果和归档都会放进这个文件夹，车型表也建议放这里。",
                 card,
             )
         )
@@ -221,7 +220,7 @@ class AutoPage(QScrollArea):
         self.upload_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_btn)
 
-        self.reexport_btn = self._btn(PushButton("强制拉最新", card), 120)
+        self.reexport_btn = self._btn(PushButton("拉取最新订单", card), 120)
         self.reexport_btn.clicked.connect(self.reexportRequested)
         row.addWidget(self.reexport_btn)
 

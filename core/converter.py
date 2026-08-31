@@ -22,7 +22,7 @@ REQUIRED_SOURCE_COLUMNS = [
     "发货方",
     "送达方地址",
     "物料",
-    "发货量",
+    "计划发货量",
     "送达方",
     "要求到厂日期",
 ]
@@ -295,7 +295,7 @@ def convert(shell_file: PathLike, car_file: Optional[PathLike] = None) -> Conver
     out["物料编码"] = src["物料"].map(extract_leading_digits)
     out["物料描述"] = src["物料"].map(clean_text)
 
-    quantity = pd.to_numeric(src["发货量"], errors="coerce").fillna(0)
+    quantity = pd.to_numeric(src["计划发货量"], errors="coerce").fillna(0)
     out["物料数量"] = quantity
     out["物料体积"] = quantity * VOLUME_PER_UNIT
     out["物料重量"] = quantity * WEIGHT_PER_UNIT

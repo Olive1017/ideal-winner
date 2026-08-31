@@ -56,7 +56,6 @@ class MainWindow(FluentWindow):
 
         self._init_window()
         self._init_pages()
-        self._init_pages()
         self._init_tray()
         self._init_scheduler()
         self._connect_signals()

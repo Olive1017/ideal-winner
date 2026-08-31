@@ -31,7 +31,7 @@ PathLike = Union[str, Path]
 
 
 def work_dir() -> Path:
-    """显式的用户工作目录：~/SDCC订单工具。"""
+    """程序目录：~/SDCC订单工具。固定不变，放 config.json、日志、锁文件。"""
     path = Path.home() / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -47,19 +47,37 @@ def _sub_dir(name: str) -> Path:
     return path
 
 
+def data_root() -> Path:
+    """订单数据根目录：用户在设置页自选的文件夹；未设置时用程序目录。
+
+    只有订单数据（壳牌订单/SDCC订单/归档）走这里；
+    config.json、日志、截图、锁文件固定在程序目录，不随数据文件夹搬。
+    """
+    custom = Config.load().data_dir.strip()
+    path = Path(custom) if custom else work_dir()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _data_sub_dir(name: str) -> Path:
+    path = data_root() / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def shell_orders_dir() -> Path:
     """壳牌 LMS 原始导出订单目录。"""
-    return _sub_dir("壳牌订单")
+    return _data_sub_dir("壳牌订单")
 
 
 def sdcc_orders_dir() -> Path:
     """转换后的 SDCC 文件目录，即待上传队列。"""
-    return _sub_dir("SDCC订单")
+    return _data_sub_dir("SDCC订单")
 
 
 def archive_dir() -> Path:
     """归档目录，按日期组织。"""
-    return _sub_dir("归档")
+    return _data_sub_dir("归档")
 
 
 def log_dir() -> Path:
@@ -164,6 +182,9 @@ class Config:
     shell_login_url: str = DEFAULT_SHELL_LOGIN_URL
     export_region: str = DEFAULT_EXPORT_REGION
     car_file: str = ""  # 车型映射表路径；相对稳定，配一次即可
+
+    # 数据文件夹（壳牌订单、SDCC订单、归档的根目录）；空 = 默认程序目录
+    data_dir: str = ""
 
     # 自动准备（每天定时导出+转换，不自动上传 SDCC）
     auto_prepare_enabled: bool = False

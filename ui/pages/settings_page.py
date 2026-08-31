@@ -1,4 +1,4 @@
-"""设置页：账号密码、壳牌导出、项目模板、浏览器与开机自启。
+"""设置页：账号密码、壳牌导出、项目模板、数据文件夹、浏览器与开机自启。
 
 密码不进配置文件，只进 Windows 凭据管理器；输入框里也不回显原密码，
 只用一个「已保存」状态提示。
@@ -33,7 +33,6 @@ from qfluentwidgets import (
 
 from services import autostart, credentials
 from services.config import Config
-
 
 EXCEL_FILTER = "Excel 文件 (*.xlsx *.xls)"
 
@@ -89,7 +88,6 @@ class SettingsPage(QScrollArea):
 
         layout.addStretch(1)
 
-   
     def _build_shell_card(self) -> CardWidget:
         card = CardWidget(self)
         inner = QVBoxLayout(card)
@@ -198,6 +196,30 @@ class SettingsPage(QScrollArea):
         inner.setSpacing(12)
         inner.addWidget(StrongBodyLabel("运行方式", card))
 
+        # 数据文件夹：壳牌订单、转换结果、归档的统一存放处
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(8)
+        dir_row.addWidget(BodyLabel("数据文件夹", card))
+
+        self.data_dir_edit = LineEdit(card)
+        self.data_dir_edit.setPlaceholderText(
+            "留空则用默认目录（用户目录下的 SDCC订单工具）"
+        )
+        dir_row.addWidget(self.data_dir_edit, 1)
+
+        dir_browse = PushButton("浏览", card)
+        dir_browse.clicked.connect(self._browse_data_dir)
+        dir_row.addWidget(dir_browse)
+
+        inner.addLayout(dir_row)
+        inner.addWidget(
+            CaptionLabel(
+                "壳牌订单、转换后的 SDCC 订单和归档都会放进这个文件夹，车型表也建议放这里。"
+                "别选 OneDrive/坚果云等同步盘，文件锁和 Excel 读写容易出怪问题",
+                card,
+            )
+        )
+
         self.headless_switch = self._switch_row(
             card,
             inner,
@@ -223,6 +245,11 @@ class SettingsPage(QScrollArea):
         )
 
         return card
+
+    def _browse_data_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择数据文件夹")
+        if path:
+            self.data_dir_edit.setText(path)
 
     def _switch_row(
         self,
@@ -254,24 +281,16 @@ class SettingsPage(QScrollArea):
     def load_config(self, config: Config) -> None:
         self._config = config
 
-      
-
-        self.shell_username_edit.setText(
-            getattr(config, "shell_username", "")
-        )
-        self.shell_login_url_edit.setText(
-            getattr(config, "shell_login_url", "")
-        )
-        self.export_region_edit.setText(
-            getattr(config, "export_region", "")
-        )
-        self.car_file_edit.setText(
-            getattr(config, "car_file", "")
-        )
+        self.shell_username_edit.setText(config.shell_username)
+        self.shell_login_url_edit.setText(config.shell_login_url)
+        self.export_region_edit.setText(config.export_region)
+        self.car_file_edit.setText(config.car_file)
 
         self.project_edit.setText(config.project)
         self.template_edit.setText(config.template)
         self.login_url_edit.setText(config.login_url)
+
+        self.data_dir_edit.setText(config.data_dir)
 
         self.headless_switch.setChecked(config.headless)
         self.tray_switch.setChecked(config.minimize_to_tray)
@@ -282,7 +301,6 @@ class SettingsPage(QScrollArea):
     def _refresh_password_hint(self) -> None:
         if not credentials.available():
             msg = "⚠ 未安装 keyring，无法保存密码：pip install keyring"
-          
             self.shell_password_hint.setText(msg)
             return
 
@@ -295,11 +313,8 @@ class SettingsPage(QScrollArea):
         )
 
     def _save(self) -> None:
-       
-
         config = self._config
 
-     
         config.project = self.project_edit.text().strip()
         config.template = self.template_edit.text().strip()
         config.login_url = self.login_url_edit.text().strip()
@@ -309,12 +324,13 @@ class SettingsPage(QScrollArea):
         config.export_region = self.export_region_edit.text().strip()
         config.car_file = self.car_file_edit.text().strip()
 
+        config.data_dir = self.data_dir_edit.text().strip()
+
         config.headless = self.headless_switch.isChecked()
         config.minimize_to_tray = self.tray_switch.isChecked()
         config.autostart = self.autostart_switch.isChecked()
 
         config.save()
-
 
         shell_password = self.shell_password_edit.text()
 
@@ -351,6 +367,7 @@ class SettingsPage(QScrollArea):
         self.login_url_edit.setText(defaults.login_url)
         self.shell_login_url_edit.setText(defaults.shell_login_url)
         self.export_region_edit.setText(defaults.export_region)
+        self.data_dir_edit.setText(defaults.data_dir)
 
         self.headless_switch.setChecked(defaults.headless)
         self.tray_switch.setChecked(defaults.minimize_to_tray)

@@ -56,6 +56,7 @@ class MainWindow(FluentWindow):
 
         self._init_window()
         self._init_pages()
+        self._init_pages()
         self._init_tray()
         self._init_scheduler()
         self._connect_signals()
@@ -110,7 +111,6 @@ class MainWindow(FluentWindow):
         self.auto_page.settingsChanged.connect(self._on_schedule_changed)
         self.auto_page.uploadRequested.connect(self._start_manual_upload)
         self.auto_page.reexportRequested.connect(self._start_reexport)
-        self.auto_page.uploadFileRequested.connect(self._start_file_upload)
 
         self.settings_page.configSaved.connect(self._on_config_saved)
 
@@ -154,10 +154,6 @@ class MainWindow(FluentWindow):
     def _start_reexport(self) -> None:
         """强制拉最新：无视队列，重新从壳牌导出再跑整条流水线。"""
         self._start_worker(force_export=True)
-
-    def _start_file_upload(self, file_path: str) -> None:
-        """上传待上传列表里指定的某一份文件（行内「上传」按钮触发）。"""
-        self._start_worker(file_path=file_path)
 
     def _start_worker(
         self, force_export: bool = False, file_path: Optional[str] = None

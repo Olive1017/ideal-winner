@@ -22,6 +22,9 @@ DEFAULT_TEMPLATE = "中海壳牌深圳-中海壳牌导入模版"
 DEFAULT_SHELL_LOGIN_URL = "https://lms.cnoocshell.com/"
 DEFAULT_EXPORT_REGION = "粤西粤北区域"
 
+# 旧版本把这三个数据文件夹直接放在程序目录；现在由用户在运行页自选
+LEGACY_DATA_DIRS = ("壳牌订单", "SDCC订单", "归档")
+
 PathLike = Union[str, Path]
 
 
@@ -47,16 +50,48 @@ def _sub_dir(name: str) -> Path:
     return path
 
 
+def data_dir_configured() -> bool:
+    """是否已在运行页选择数据文件夹。未选择时整条流水线都应被拦在入口。"""
+    return bool(Config.load().data_dir.strip())
+
+
 def data_root() -> Path:
-    """订单数据根目录：用户在设置页自选的文件夹；未设置时用程序目录。
+    """订单数据根目录：用户在运行页选择的文件夹。
 
     只有订单数据（壳牌订单/SDCC订单/归档）走这里；
     config.json、日志、截图、锁文件固定在程序目录，不随数据文件夹搬。
+
+    未选择时返回程序目录下的「数据」占位路径但不创建——正常流程在
+    UI 和调度入口就会拦截未选择的情况，不会走到这里。
     """
     custom = Config.load().data_dir.strip()
-    path = Path(custom) if custom else work_dir()
+    if not custom:
+        return work_dir() / "数据"
+    path = Path(custom)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def migrate_legacy_data(target: PathLike) -> List[str]:
+    """把旧版本放在程序目录下的订单数据搬到新选的数据文件夹。
+
+    返回实际搬走的文件夹名。目标里已有同名目录时跳过，不覆盖新数据。
+    """
+    moved: List[str] = []
+    target_path = Path(target)
+    for name in LEGACY_DATA_DIRS:
+        src = work_dir() / name
+        dst = target_path / name
+        if not src.is_dir() or dst.exists():
+            continue
+        try:
+            if src.resolve() == dst.resolve():
+                continue
+            shutil.move(str(src), str(dst))
+            moved.append(name)
+        except OSError:
+            continue
+    return moved
 
 
 def _data_sub_dir(name: str) -> Path:
@@ -183,7 +218,8 @@ class Config:
     export_region: str = DEFAULT_EXPORT_REGION
     car_file: str = ""  # 车型映射表路径；相对稳定，配一次即可
 
-    # 数据文件夹（壳牌订单、SDCC订单、归档的根目录）；空 = 默认程序目录
+    # 数据文件夹（壳牌订单、SDCC订单、归档的根目录），在运行页选择；
+    # 空 = 未选择，UI 和调度入口都会拦截，整条流水线不会启动
     data_dir: str = ""
 
     # 自动准备（每天定时导出+转换，不自动上传 SDCC）

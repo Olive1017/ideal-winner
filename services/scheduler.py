@@ -17,6 +17,7 @@ from .config import (
     Config,
     archive_outbox,
     clear_stale_outbox,
+    data_dir_configured,
     latest_outbox,
     screenshot_dir,
     sdcc_file_name,
@@ -31,6 +32,8 @@ JOB_ID_RETRY_PREFIX = "retry_prepare"
 PathLike = Union[str, Path]
 ProgressCallback = Optional[Callable[[str, str, str], None]]
 ResultCallback = Optional[Callable[[UploadResult], None]]
+
+NO_DATA_DIR_MSG = "尚未选择数据文件夹，请先在「运行」页选择"
 
 
 def _export_and_convert(config: Config, logger, report) -> Path:
@@ -86,6 +89,16 @@ def prepare_orders(
                 progress(step, status, message)
             except Exception:  # noqa: BLE001
                 pass
+
+    # 没选数据文件夹就别跑，更不能往程序目录里创建数据文件夹
+    if not config.data_dir.strip():
+        report("run", "fail", NO_DATA_DIR_MSG)
+        return UploadResult(
+            status=UploadStatus.FAILED,
+            message=NO_DATA_DIR_MSG,
+            run_id=logger.run_id,
+            retryable=False,
+        )
 
     if not upload_lock.acquire():
         report("lock", "info", "已有任务在执行，本次跳过")
@@ -181,6 +194,15 @@ def upload_order(
                 progress(step, status, message)
             except Exception:  # noqa: BLE001
                 pass
+
+    if not config.data_dir.strip():
+        report("run", "fail", NO_DATA_DIR_MSG)
+        return UploadResult(
+            status=UploadStatus.FAILED,
+            message=NO_DATA_DIR_MSG,
+            run_id=logger.run_id,
+            retryable=False,
+        )
 
     # 与定时任务互斥：两个浏览器同时登同一个 SDCC 账号会互踢。
     # FileLock 同线程可重入，下面调 prepare_orders 不会死锁。
@@ -335,6 +357,17 @@ class UploadScheduler:
 
     def _run_scheduled(self) -> None:
         self._clear_retries()
+        # 未选数据文件夹时直接失败通知，不创建任何目录
+        if not data_dir_configured():
+            self._notify(
+                UploadResult(
+                    status=UploadStatus.FAILED,
+                    message="尚未选择数据文件夹，自动准备已跳过；请在「运行」页选择",
+                    run_id=new_run_id(),
+                    retryable=False,
+                )
+            )
+            return
         removed = clear_stale_outbox()
         if removed and self.progress is not None:
             names = "、".join(p.name for p in removed)

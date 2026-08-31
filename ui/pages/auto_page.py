@@ -1,4 +1,4 @@
-"""运行页：自动准备开关、时间、队列状态、实时进度。
+"""运行页：数据文件夹、自动准备开关、时间、队列状态、实时进度。
 
 页面本身不持有调度器，只发信号；调度器由主窗口统一管理，
 避免关窗口后调度器跟着死掉。
@@ -13,6 +13,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QTime, Signal
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QScrollArea,
@@ -25,6 +26,8 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     IndeterminateProgressBar,
+    InfoBar,
+    InfoBarPosition,
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
@@ -34,7 +37,13 @@ from qfluentwidgets import (
     TimeEdit,
 )
 
-from services.config import Config, data_root, outbox_files
+from services.config import (
+    Config,
+    data_root,
+    migrate_legacy_data,
+    outbox_files,
+    work_dir,
+)
 
 # 进度框最多保留的行数，再多就去日志页看
 MAX_PROGRESS_LINES = 200
@@ -110,9 +119,43 @@ class AutoPage(QScrollArea):
         layout.setSpacing(16)
 
         layout.addWidget(SubtitleLabel("订单处理", self._content))
+        layout.addWidget(self._build_folder_card())
         layout.addWidget(self._build_switch_card())
         layout.addWidget(self._build_status_card())
         layout.addWidget(self._build_progress_card(), 1)
+
+    def _build_folder_card(self) -> CardWidget:
+        """数据文件夹：整条流水线的先决条件，所以放在运行页最上面。"""
+        card = CardWidget(self._content)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 16, 20, 16)
+        inner.setSpacing(10)
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addWidget(StrongBodyLabel("数据文件夹", card))
+        self.data_dir_label = CaptionLabel("", card)
+        self.data_dir_label.setWordWrap(True)
+        text.addWidget(self.data_dir_label)
+        row.addLayout(text, 1)
+
+        self.choose_dir_btn = self._btn(PrimaryPushButton("选择文件夹", card), 120)
+        self.choose_dir_btn.clicked.connect(self._choose_data_folder)
+        row.addWidget(self.choose_dir_btn)
+        inner.addLayout(row)
+
+        inner.addWidget(
+            CaptionLabel(
+                "壳牌订单、转换结果和归档都会放进这个文件夹，车型表也建议放这里。"
+                "别选 OneDrive/坚果云等同步盘，文件锁和 Excel 读写容易出怪问题",
+                card,
+            )
+        )
+
+        return card
 
     def _build_switch_card(self) -> CardWidget:
         card = CardWidget(self._content)
@@ -227,8 +270,18 @@ class AutoPage(QScrollArea):
             self.time_edit.setTime(QTime(hour, minute))
         finally:
             self._suppress = False
+        self._refresh_data_dir()
 
     def refresh_queue(self) -> None:
+        if not self._config.data_dir.strip():
+            self.queue_label.setText("待上传订单：未选择数据文件夹")
+            self.plan_label.setText(
+                "先点上方「选择文件夹」，壳牌订单和转换结果都会放进你选的文件夹。"
+            )
+            self.upload_btn.setEnabled(False)
+            self.reexport_btn.setEnabled(False)
+            return
+
         files = outbox_files()
         if not files:
             self.queue_label.setText("待上传订单：暂无")
@@ -246,6 +299,7 @@ class AutoPage(QScrollArea):
             )
 
         self.upload_btn.setEnabled(True)
+        self.reexport_btn.setEnabled(True)
 
     def set_next_run(self, next_run: Optional[datetime]) -> None:
         if next_run is None:
@@ -254,8 +308,9 @@ class AutoPage(QScrollArea):
             self.next_run_label.setText(f"下次执行：{next_run:%Y-%m-%d %H:%M}")
 
     def set_running(self, running: bool) -> None:
-        self.upload_btn.setEnabled(not running)
-        self.reexport_btn.setEnabled(not running)
+        can_run = bool(self._config.data_dir.strip())
+        self.upload_btn.setEnabled(not running and can_run)
+        self.reexport_btn.setEnabled(not running and can_run)
         self.upload_btn.setText("处理中…" if running else "开始处理")
         self.progress_bar.setVisible(running)
         if running:
@@ -267,7 +322,69 @@ class AutoPage(QScrollArea):
         stamp = datetime.now().strftime("%H:%M:%S")
         self.progress_text.appendPlainText(f"{stamp}  {icon} [{label}] {message}")
 
+    # -------------------------------------------------------------- 数据文件夹
+
+    def _refresh_data_dir(self) -> None:
+        data_dir = self._config.data_dir.strip()
+        if data_dir:
+            self.data_dir_label.setText(data_dir)
+            self.choose_dir_btn.setText("更改")
+        else:
+            self.data_dir_label.setText("还未选择——选了文件夹才能开始处理订单")
+            self.choose_dir_btn.setText("选择文件夹")
+
+    def _choose_data_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择数据文件夹")
+        if not path:
+            return
+
+        chosen = Path(path)
+        if chosen.resolve() == work_dir().resolve():
+            InfoBar.warning(
+                "换一个文件夹",
+                "这是程序自己的目录，请选一个专门放订单数据的文件夹",
+                duration=4000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+            return
+
+        self._config.data_dir = str(chosen)
+        self._config.save()
+
+        # 旧版本的数据在程序目录下，顺手搬过来，历史归档和队列不丢
+        moved = migrate_legacy_data(chosen)
+
+        self._refresh_data_dir()
+        self.refresh_queue()
+
+        if moved:
+            InfoBar.success(
+                "已选择",
+                f"已把旧数据（{'、'.join(moved)}）搬到新文件夹",
+                duration=4000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+        else:
+            InfoBar.success(
+                "已选择",
+                "数据文件夹已生效",
+                duration=2500,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+
     def _open_data_folder(self) -> None:
+        if not self._config.data_dir.strip():
+            InfoBar.warning(
+                "还没有数据文件夹",
+                "先点上方「选择文件夹」",
+                duration=3000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+            return
         folder = data_root()
         folder.mkdir(parents=True, exist_ok=True)
         try:

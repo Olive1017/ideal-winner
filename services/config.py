@@ -72,27 +72,6 @@ def data_root() -> Path:
     return path
 
 
-def migrate_legacy_data(target: PathLike) -> List[str]:
-    """把旧版本放在程序目录下的订单数据搬到新选的数据文件夹。
-
-    返回实际搬走的文件夹名。目标里已有同名目录时跳过，不覆盖新数据。
-    """
-    moved: List[str] = []
-    target_path = Path(target)
-    for name in LEGACY_DATA_DIRS:
-        src = work_dir() / name
-        dst = target_path / name
-        if not src.is_dir() or dst.exists():
-            continue
-        try:
-            if src.resolve() == dst.resolve():
-                continue
-            shutil.move(str(src), str(dst))
-            moved.append(name)
-        except OSError:
-            continue
-    return moved
-
 
 def _data_sub_dir(name: str) -> Path:
     path = data_root() / name
@@ -221,6 +200,12 @@ class Config:
     # 数据文件夹（壳牌订单、SDCC订单、归档的根目录），在运行页选择；
     # 空 = 未选择，UI 和调度入口都会拦截，整条流水线不会启动
     data_dir: str = ""
+
+        # SDCC API 直传（transfer_mode = "api" 时生效）
+    transfer_mode: str = "rpa"  # rpa=浏览器人工上传（兜底）；api=HTTP 接口直传
+    api_base_url: str = "https://apitest.i.sinotrans.com"  # 先 UAT，上线切 https://api.sinotrans.com
+    data_source_from: str = ""  # 网关鉴权的来源标识，SDCC 方提供
+    api_item_code: str = "HN_SZ_ZHQPSZ"  # orderInfo.itemCode 项目编码，SDCC 方提供
 
     # 自动准备（每天定时导出+转换，不自动上传 SDCC）
     auto_prepare_enabled: bool = False

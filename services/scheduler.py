@@ -11,6 +11,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from core.models import ConvertError, UploadError, UploadResult, UploadStatus
 from core.uploader import upload_file
+from core.api_uploader import KEYRING_API_KEY, KEYRING_KEY_ID, upload_file_api
 
 from . import credentials
 from .config import (
@@ -244,13 +245,23 @@ def upload_order(
 
         try:
             report("run", "start", f"开始上传：{target.name}")
-            message = upload_file(
-                file_path=target,
-                config=config,
-                logger=logger,
-                screenshot_dir=screenshot_dir(),
-                progress=progress,
-            )
+            if config.transfer_mode == "api":
+                message = upload_file_api(
+                    target,
+                    config,
+                    key_id=credentials.get_password(KEYRING_KEY_ID) or "",
+                    api_key=credentials.get_password(KEYRING_API_KEY) or "",
+                    logger=logger,
+                    progress=progress,
+                )
+            else:
+                message = upload_file(
+                    file_path=target,
+                    config=config,
+                    logger=logger,
+                    screenshot_dir=screenshot_dir(),
+                    progress=progress,
+                )
             archived = archive_outbox(target, success=True)
             duration = time.monotonic() - started
             report("run", "success", f"上传完成，耗时 {duration:.1f}s")
@@ -378,7 +389,11 @@ class UploadScheduler:
         self._execute(attempt=1)
 
     def _execute(self, attempt: int) -> None:
-        result = prepare_orders(self.config, attempt=attempt, progress=self.progress)
+        if self.config.transfer_mode == "api":
+            # API 模式：定时任务全自动，导出 → 转换 → 上传一次跑完
+            result = upload_order(self.config, progress=self.progress)
+        else:
+            result = prepare_orders(self.config, attempt=attempt, progress=self.progress)
 
         if result.status is UploadStatus.FAILED and result.retryable:
             self._schedule_retry(attempt)

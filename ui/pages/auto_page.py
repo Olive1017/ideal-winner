@@ -40,7 +40,6 @@ from qfluentwidgets import (
 from services.config import (
     Config,
     data_root,
-    migrate_legacy_data,
     outbox_files,
     work_dir,
 )
@@ -167,12 +166,8 @@ class AutoPage(QScrollArea):
         text = QVBoxLayout()
         text.setSpacing(2)
         text.addWidget(StrongBodyLabel("自动准备订单", card))
-        text.addWidget(
-            CaptionLabel(
-                "开启后程序驻留托盘，每天定时从壳牌导出订单并转换成 SDCC 格式，不自动上传 SDCC。",
-                card,
-            )
-        )
+        self.switch_caption = CaptionLabel("", card)
+        text.addWidget(self.switch_caption)
         row.addLayout(text)
         row.addStretch(1)
 
@@ -262,6 +257,11 @@ class AutoPage(QScrollArea):
     def load_config(self, config: Config) -> None:
         """把配置回写到控件，不触发 settingsChanged。"""
         self._config = config
+        self.switch_caption.setText(
+            "开启后程序驻留托盘，每天定时导出 → 转换 → API 自动上传，全程无人值守。"
+            if config.transfer_mode == "api"
+            else "开启后程序驻留托盘，每天定时从壳牌导出订单并转换成 SDCC 格式，不自动上传 SDCC。"
+        )
         self._suppress = True
         try:
             self.enable_switch.setChecked(config.auto_prepare_enabled)
@@ -351,28 +351,9 @@ class AutoPage(QScrollArea):
         self._config.data_dir = str(chosen)
         self._config.save()
 
-        # 旧版本的数据在程序目录下，顺手搬过来，历史归档和队列不丢
-        moved = migrate_legacy_data(chosen)
-
         self._refresh_data_dir()
         self.refresh_queue()
 
-        if moved:
-            InfoBar.success(
-                "已选择",
-                f"已把旧数据（{'、'.join(moved)}）搬到新文件夹",
-                duration=4000,
-                position=InfoBarPosition.TOP_RIGHT,
-                parent=self,
-            )
-        else:
-            InfoBar.success(
-                "已选择",
-                "数据文件夹已生效",
-                duration=2500,
-                position=InfoBarPosition.TOP_RIGHT,
-                parent=self,
-            )
 
     def _open_data_folder(self) -> None:
         if not self._config.data_dir.strip():

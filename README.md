@@ -166,3 +166,4 @@ pyinstaller main.py --noconsole --onefile --name ShellConvert \
 - 无自动更新，换版本需重新发 exe
 - SDCC 页面改版可能导致选择器失效，看日志截图定位后改 `core/uploader.py`
 - 壳牌 LMS 页面改版同理，改 `core/shell_exporter.py`
+                

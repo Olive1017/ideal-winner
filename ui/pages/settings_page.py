@@ -1,6 +1,6 @@
-"""设置页：账号密码、壳牌导出、项目模板、浏览器与开机自启。
+"""设置页：账号密码、壳牌导出、项目模板、API 直传、浏览器与开机自启。
 
-密码不进配置文件，只进 Windows 凭据管理器；输入框里也不回显原密码，
+密码和 API 密钥不进配置文件，只进 Windows 凭据管理器；输入框里也不回显，
 只用一个「已保存」状态提示。
 """
 
@@ -20,6 +20,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    ComboBox,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -31,10 +32,13 @@ from qfluentwidgets import (
     SwitchButton,
 )
 
+from core.api_uploader import KEYRING_API_KEY, KEYRING_KEY_ID
 from services import autostart, credentials
 from services.config import Config
 
 EXCEL_FILTER = "Excel 文件 (*.xlsx *.xls)"
+
+TRANSFER_MODES = ("浏览器上传（人工登录）", "API 直传（全自动）")
 
 
 class SettingsPage(QScrollArea):
@@ -71,6 +75,7 @@ class SettingsPage(QScrollArea):
         layout.addWidget(SubtitleLabel("设置", self._content))
         layout.addWidget(self._build_shell_card())
         layout.addWidget(self._build_import_card())
+        layout.addWidget(self._build_api_card())
         layout.addWidget(self._build_advanced_card())
 
         buttons = QHBoxLayout()
@@ -189,6 +194,56 @@ class SettingsPage(QScrollArea):
 
         return card
 
+    def _build_api_card(self) -> CardWidget:
+        """SDCC API 直传：传输方式、接口地址与凭证。密钥进 keyring，不进 config.json。"""
+        card = CardWidget(self)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 16, 20, 16)
+        inner.setSpacing(10)
+        inner.addWidget(StrongBodyLabel("SDCC API 直传（推荐）", card))
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(BodyLabel("传输方式", card))
+        self.transfer_mode_combo = ComboBox(card)
+        self.transfer_mode_combo.addItems(list(TRANSFER_MODES))
+        mode_row.addWidget(self.transfer_mode_combo, 1)
+        inner.addLayout(mode_row)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.api_base_url_edit = LineEdit(card)
+        self.api_base_url_edit.setPlaceholderText("UAT：https://apitest.i.sinotrans.com")
+        form.addRow(BodyLabel("接口地址", card), self.api_base_url_edit)
+
+        self.data_source_from_edit = LineEdit(card)
+        self.data_source_from_edit.setPlaceholderText("数据来源标识，SDCC 方提供")
+        form.addRow(BodyLabel("dataSourceFrom", card), self.data_source_from_edit)
+
+        self.api_item_code_edit = LineEdit(card)
+        self.api_item_code_edit.setPlaceholderText("项目编码 itemCode，SDCC 方提供")
+        form.addRow(BodyLabel("项目编码", card), self.api_item_code_edit)
+
+    
+        self.api_key_edit = PasswordLineEdit(card)
+        self.api_key_edit.setPlaceholderText("留空则不修改已保存的 apiKey")
+        form.addRow(BodyLabel("apiKey", card), self.api_key_edit)
+
+        inner.addLayout(form)
+
+        self.api_credential_hint = CaptionLabel("", card)
+        inner.addWidget(self.api_credential_hint)
+
+        inner.addWidget(
+            CaptionLabel(
+                "密钥只存 Windows 凭据管理器，不进配置文件；先接 UAT 跑通，再把接口地址切成生产",
+                card,
+            )
+        )
+
+        return card
+
     def _build_advanced_card(self) -> CardWidget:
         card = CardWidget(self)
         inner = QVBoxLayout(card)
@@ -261,11 +316,19 @@ class SettingsPage(QScrollArea):
         self.template_edit.setText(config.template)
         self.login_url_edit.setText(config.login_url)
 
+        self.transfer_mode_combo.setCurrentIndex(
+            1 if config.transfer_mode == "api" else 0
+        )
+        self.api_base_url_edit.setText(config.api_base_url)
+        self.data_source_from_edit.setText(config.data_source_from)
+        self.api_item_code_edit.setText(config.api_item_code)
+
         self.headless_switch.setChecked(config.headless)
         self.tray_switch.setChecked(config.minimize_to_tray)
         self.autostart_switch.setChecked(autostart.is_enabled())
 
         self._refresh_password_hint()
+        self._refresh_api_hint()
 
     def _refresh_password_hint(self) -> None:
         if not credentials.available():
@@ -281,6 +344,18 @@ class SettingsPage(QScrollArea):
             else "尚未保存密码"
         )
 
+    def _refresh_api_hint(self) -> None:
+        if not credentials.available():
+            self.api_credential_hint.setText("")
+            return
+       
+        has_key = credentials.has_password(KEYRING_API_KEY)
+        self.api_credential_hint.setText(
+            "✓ keyId / apiKey 已保存"
+            if has_key
+            else "尚未保存 keyId / apiKey"
+        )
+
     def _save(self) -> None:
         config = self._config
 
@@ -292,6 +367,13 @@ class SettingsPage(QScrollArea):
         config.shell_login_url = self.shell_login_url_edit.text().strip()
         config.export_region = self.export_region_edit.text().strip()
         config.car_file = self.car_file_edit.text().strip()
+
+        config.transfer_mode = (
+            "api" if self.transfer_mode_combo.currentIndex() == 1 else "rpa"
+        )
+        config.api_base_url = self.api_base_url_edit.text().strip()
+        config.data_source_from = self.data_source_from_edit.text().strip()
+        config.api_item_code = self.api_item_code_edit.text().strip()
 
         config.headless = self.headless_switch.isChecked()
         config.minimize_to_tray = self.tray_switch.isChecked()
@@ -312,10 +394,19 @@ class SettingsPage(QScrollArea):
             else:
                 self._warn("壳牌密码保存失败（请先填壳牌账号）")
 
+
+        api_key = self.api_key_edit.text()
+        if api_key:
+            if credentials.set_password(KEYRING_API_KEY, api_key):
+                self.api_key_edit.clear()
+            else:
+                self._warn("apiKey 保存失败")
+
         if autostart.supported():
             autostart.apply(config.autostart)
 
         self._refresh_password_hint()
+        self._refresh_api_hint()
         self.configSaved.emit(config)
 
         InfoBar.success(
@@ -334,6 +425,13 @@ class SettingsPage(QScrollArea):
         self.login_url_edit.setText(defaults.login_url)
         self.shell_login_url_edit.setText(defaults.shell_login_url)
         self.export_region_edit.setText(defaults.export_region)
+
+        self.transfer_mode_combo.setCurrentIndex(
+            1 if defaults.transfer_mode == "api" else 0
+        )
+        self.api_base_url_edit.setText(defaults.api_base_url)
+        self.data_source_from_edit.setText(defaults.data_source_from)
+        self.api_item_code_edit.setText(defaults.api_item_code)
 
         self.headless_switch.setChecked(defaults.headless)
         self.tray_switch.setChecked(defaults.minimize_to_tray)

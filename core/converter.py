@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
+import zipfile
+import xml.etree.ElementTree as ET
+from typing import Optional
 
 from .models import ConvertError, ConvertResult
 
@@ -103,6 +106,23 @@ def clean_text(value) -> str:
         text = text[1:].strip()
     return text
 
+def _xlsx_doc_created(path: Path) -> Optional[pd.Timestamp]:
+    try:
+        with zipfile.ZipFile(path) as z:
+            with z.open("docProps/core.xml") as f:
+                tree = ET.parse(f)
+                root = tree.getroot()
+                ns = {"dcterms": "http://purl.org/dc/terms/"}
+                created_el = root.find(".//dcterms:created", ns)
+                if created_el is None or not created_el.text:
+                    return None
+                ts = pd.to_datetime(created_el.text)
+                if ts.tzinfo is not None:
+                    local_dt = ts.to_pydatetime().astimezone()   # 转本地时区
+                    return pd.to_datetime(local_dt.replace(tzinfo=None))
+                return ts
+    except Exception:
+        return None
 
 def delivery_key(value) -> str:
     """交货单号的匹配键。
@@ -279,7 +299,9 @@ def convert(shell_file: PathLike, car_file: Optional[PathLike] = None) -> Conver
 
     out = pd.DataFrame(index=src.index)
 
-    out["客户订单时间"] = arrival + timedelta(days=OFFSET_ORDER_TIME_DAYS)
+    file_time = _xlsx_doc_created(shell_path) or pd.to_datetime(shell_path.stat().st_mtime, unit="s")
+    order_time = file_time - pd.Timedelta(minutes=30)
+    out["客户订单时间"] = pd.Series([order_time] * len(src), index=src.index)
     out["计划发货时间"] = arrival + timedelta(days=OFFSET_SHIP_TIME_DAYS)
     out["计划到达时间"] = arrival + timedelta(days=OFFSET_ARRIVE_TIME_DAYS)
 
@@ -331,7 +353,10 @@ def convert(shell_file: PathLike, car_file: Optional[PathLike] = None) -> Conver
     out = out[OUTPUT_COLUMNS].copy()
 
     for col in DATE_COLUMNS:
-        out[col] = out[col].dt.strftime(DATE_FORMAT)
+        if col == "客户订单时间":
+          out[col] = out[col].dt.strftime("%Y-%m-%d %H:%M")
+        else:
+          out[col] = out[col].dt.strftime(DATE_FORMAT)
     for col in NUMERIC_COLUMNS:
         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).round(2)
 

@@ -75,7 +75,6 @@ class SettingsPage(QScrollArea):
         layout.addWidget(SubtitleLabel("设置", self._content))
         layout.addWidget(self._build_shell_card())
         layout.addWidget(self._build_import_card())
-        layout.addWidget(self._build_api_card())
         layout.addWidget(self._build_advanced_card())
 
         buttons = QHBoxLayout()
@@ -194,48 +193,23 @@ class SettingsPage(QScrollArea):
 
         return card
 
-    def _build_api_card(self) -> CardWidget:
-        """SDCC API 直传：传输方式、接口地址与凭证。密钥进 keyring，不进 config.json。"""
-        card = CardWidget(self)
-        inner = QVBoxLayout(card)
-        inner.setContentsMargins(20, 16, 20, 16)
-        inner.setSpacing(10)
-        inner.addWidget(StrongBodyLabel("SDCC API 直传（推荐）", card))
-
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
-        mode_row.addWidget(BodyLabel("传输方式", card))
-        self.transfer_mode_combo = ComboBox(card)
-        self.transfer_mode_combo.addItems(list(TRANSFER_MODES))
-        mode_row.addWidget(self.transfer_mode_combo, 1)
-        inner.addLayout(mode_row)
-
-        form = QFormLayout()
-        form.setSpacing(10)
-
-        self.api_base_url_edit = LineEdit(card)
-        self.api_base_url_edit.setPlaceholderText("UAT：https://api.sinotrans.com")
-        form.addRow(BodyLabel("接口地址", card), self.api_base_url_edit)
-
-
-        self.api_credential_hint = CaptionLabel("", card)
-        inner.addWidget(self.api_credential_hint)
-
-        inner.addWidget(
-            CaptionLabel(
-                "密钥只存 Windows 凭据管理器，不进配置文件；先接 UAT 跑通，再把接口地址切成生产",
-                card,
-            )
-        )
-
-        return card
-
     def _build_advanced_card(self) -> CardWidget:
         card = CardWidget(self)
         inner = QVBoxLayout(card)
         inner.setContentsMargins(20, 16, 20, 16)
         inner.setSpacing(12)
         inner.addWidget(StrongBodyLabel("运行方式", card))
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(BodyLabel("上传方式", card))
+        self.transfer_mode_combo = ComboBox(card)
+        self.transfer_mode_combo.addItems(list(TRANSFER_MODES))
+        mode_row.addWidget(self.transfer_mode_combo, 1)
+        inner.addLayout(mode_row)
+
+        self.api_credential_hint = CaptionLabel("", card)
+        inner.addWidget(self.api_credential_hint)
 
         self.headless_switch = self._switch_row(
             card,
@@ -305,8 +279,7 @@ class SettingsPage(QScrollArea):
         self.transfer_mode_combo.setCurrentIndex(
             1 if config.transfer_mode == "api" else 0
         )
-        self.api_base_url_edit.setText(config.api_base_url)
-      
+
         self.headless_switch.setChecked(config.headless)
         self.tray_switch.setChecked(config.minimize_to_tray)
         self.autostart_switch.setChecked(autostart.is_enabled())
@@ -355,8 +328,7 @@ class SettingsPage(QScrollArea):
         config.transfer_mode = (
             "api" if self.transfer_mode_combo.currentIndex() == 1 else "rpa"
         )
-        config.api_base_url = self.api_base_url_edit.text().strip()
-       
+
         config.headless = self.headless_switch.isChecked()
         config.minimize_to_tray = self.tray_switch.isChecked()
         config.autostart = self.autostart_switch.isChecked()
@@ -405,8 +377,7 @@ class SettingsPage(QScrollArea):
         self.transfer_mode_combo.setCurrentIndex(
             1 if defaults.transfer_mode == "api" else 0
         )
-        self.api_base_url_edit.setText(defaults.api_base_url)
-      
+
         self.headless_switch.setChecked(defaults.headless)
         self.tray_switch.setChecked(defaults.minimize_to_tray)
 

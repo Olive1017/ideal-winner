@@ -24,7 +24,7 @@ from .models import ErrorKind, UploadError
 PathLike = Union[str, Path]
 ProgressCallback = Optional[Callable[[str, str, str], None]]
 
-API_PATH = "/sdcc/v1/outerapi/com/comCustomerOrderSet"
+API_PATH = "/sdcc/outerapi/v1/com/comCustomerOrderSet"
 REQUEST_TIMEOUT_SEC = 30
 
 # keyring 条目名：设置页保存凭证时必须用这两个名字
@@ -61,12 +61,18 @@ def _num(value) -> float:
         return 0.0
 
 
+
 def _dt(value) -> str:
-    """转换产物是 yyyy-MM-dd，接口要 yyyy-MM-dd HH:mm:ss，补零点后缀。"""
+    """统一转成 yyyy-MM-dd HH:mm:ss"""
     text = _text(value)
     if not text:
         return ""
-    return text if len(text) > 10 else f"{text} 00:00:00"
+
+    dt = pd.to_datetime(text, errors="coerce")
+    if pd.isna(dt):
+        return ""
+
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 # --------------------------------------------------------------------------- #
@@ -116,10 +122,12 @@ def _build_payload(row: Dict, config) -> Dict:
 # --------------------------------------------------------------------------- #
 
 
-def _post_order(payload: Dict, api_key: str, base_url: str) -> str:
+def _post_order(payload: Dict, key_id: str, api_key: str, base_url: str) -> str:
     """发一单，成功返回 SDCC 单号；失败抛 UploadError。"""
     url = base_url.rstrip("/") + API_PATH
     headers = {"apiKey": api_key}
+    if key_id:
+        headers["keyId"] = key_id
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SEC)
     except (requests.Timeout, requests.ConnectionError) as exc:
@@ -208,7 +216,7 @@ def upload_file_api(
         report("upload", "start", f"[{i}/{total}] 推送订单 {order_no}")
         payload = _build_payload(row.to_dict(), config)
         try:
-            sdcc_no = _post_order(payload, api_key, config.api_base_url)
+            sdcc_no = _post_order(payload, key_id, api_key, config.api_base_url)
         except UploadError as exc:
             if exc.retryable or "鉴权" in exc.message:
                 # 网络/鉴权问题：剩余单打了也白打，整批中止交给调度器重试
@@ -243,7 +251,7 @@ if __name__ == "__main__":  # pragma: no cover - UAT 手动测试入口
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--data-source-from", required=True)
     parser.add_argument("--item-code", required=True)
-    parser.add_argument("--base-url", default="https://apitest.i.sinotrans.com")
+    parser.add_argument("--base-url", default="https://api.sinotrans.com")
     parser.add_argument("--project", default="中海壳牌深圳")
     args = parser.parse_args()
 

@@ -214,23 +214,9 @@ class SettingsPage(QScrollArea):
         form.setSpacing(10)
 
         self.api_base_url_edit = LineEdit(card)
-        self.api_base_url_edit.setPlaceholderText("UAT：https://apitest.i.sinotrans.com")
+        self.api_base_url_edit.setPlaceholderText("UAT：https://api.sinotrans.com")
         form.addRow(BodyLabel("接口地址", card), self.api_base_url_edit)
 
-        self.data_source_from_edit = LineEdit(card)
-        self.data_source_from_edit.setPlaceholderText("数据来源标识，SDCC 方提供")
-        form.addRow(BodyLabel("dataSourceFrom", card), self.data_source_from_edit)
-
-        self.api_item_code_edit = LineEdit(card)
-        self.api_item_code_edit.setPlaceholderText("项目编码 itemCode，SDCC 方提供")
-        form.addRow(BodyLabel("项目编码", card), self.api_item_code_edit)
-
-    
-        self.api_key_edit = PasswordLineEdit(card)
-        self.api_key_edit.setPlaceholderText("留空则不修改已保存的 apiKey")
-        form.addRow(BodyLabel("apiKey", card), self.api_key_edit)
-
-        inner.addLayout(form)
 
         self.api_credential_hint = CaptionLabel("", card)
         inner.addWidget(self.api_credential_hint)
@@ -320,9 +306,7 @@ class SettingsPage(QScrollArea):
             1 if config.transfer_mode == "api" else 0
         )
         self.api_base_url_edit.setText(config.api_base_url)
-        self.data_source_from_edit.setText(config.data_source_from)
-        self.api_item_code_edit.setText(config.api_item_code)
-
+      
         self.headless_switch.setChecked(config.headless)
         self.tray_switch.setChecked(config.minimize_to_tray)
         self.autostart_switch.setChecked(autostart.is_enabled())
@@ -372,9 +356,7 @@ class SettingsPage(QScrollArea):
             "api" if self.transfer_mode_combo.currentIndex() == 1 else "rpa"
         )
         config.api_base_url = self.api_base_url_edit.text().strip()
-        config.data_source_from = self.data_source_from_edit.text().strip()
-        config.api_item_code = self.api_item_code_edit.text().strip()
-
+       
         config.headless = self.headless_switch.isChecked()
         config.minimize_to_tray = self.tray_switch.isChecked()
         config.autostart = self.autostart_switch.isChecked()
@@ -395,12 +377,6 @@ class SettingsPage(QScrollArea):
                 self._warn("壳牌密码保存失败（请先填壳牌账号）")
 
 
-        api_key = self.api_key_edit.text()
-        if api_key:
-            if credentials.set_password(KEYRING_API_KEY, api_key):
-                self.api_key_edit.clear()
-            else:
-                self._warn("apiKey 保存失败")
 
         if autostart.supported():
             autostart.apply(config.autostart)
@@ -430,9 +406,7 @@ class SettingsPage(QScrollArea):
             1 if defaults.transfer_mode == "api" else 0
         )
         self.api_base_url_edit.setText(defaults.api_base_url)
-        self.data_source_from_edit.setText(defaults.data_source_from)
-        self.api_item_code_edit.setText(defaults.api_item_code)
-
+      
         self.headless_switch.setChecked(defaults.headless)
         self.tray_switch.setChecked(defaults.minimize_to_tray)
 

@@ -197,13 +197,11 @@ class Config:
     export_region: str = DEFAULT_EXPORT_REGION
     car_file: str = ""  # 车型映射表路径；相对稳定，配一次即可
 
-    # 数据文件夹（壳牌订单、SDCC订单、归档的根目录），在运行页选择；
-    # 空 = 未选择，UI 和调度入口都会拦截，整条流水线不会启动
     data_dir: str = ""
 
         # SDCC API 直传（transfer_mode = "api" 时生效）
     transfer_mode: str = "rpa"  # rpa=浏览器人工上传（兜底）；api=HTTP 接口直传
-    api_base_url: str = "https://apitest.i.sinotrans.com"  # 先 UAT，上线切 https://api.sinotrans.com
+    api_base_url: str = "https://api.sinotrans.com"  
     data_source_from: str = ""  # 网关鉴权的来源标识，SDCC 方提供
     api_item_code: str = "HN_SZ_ZHQPSZ"  # orderInfo.itemCode 项目编码，SDCC 方提供
 

@@ -353,10 +353,10 @@ def convert(shell_file: PathLike, car_file: Optional[PathLike] = None) -> Conver
     out = out[OUTPUT_COLUMNS].copy()
 
     for col in DATE_COLUMNS:
-        if col == "客户订单时间":
-          out[col] = out[col].dt.strftime("%Y-%m-%d %H:%M")
-        else:
-          out[col] = out[col].dt.strftime(DATE_FORMAT)
+     if col == "客户订单时间":
+        out[col] = out[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+     else:
+        out[col] = out[col].dt.strftime(DATE_FORMAT)
     for col in NUMERIC_COLUMNS:
         out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).round(2)
 

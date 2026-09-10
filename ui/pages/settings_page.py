@@ -38,7 +38,7 @@ from services.config import Config
 
 EXCEL_FILTER = "Excel 文件 (*.xlsx *.xls)"
 
-TRANSFER_MODES = ("浏览器上传（人工登录）", "API 直传（全自动）")
+TRANSFER_MODES = ("浏览器上传（人工登录）", "API 直传")
 
 
 class SettingsPage(QScrollArea):
@@ -130,7 +130,7 @@ class SettingsPage(QScrollArea):
 
         self.car_file_edit = LineEdit(card)
         self.car_file_edit.setPlaceholderText(
-            "车型映射 Excel（可留空，车型将全部填「未知」）"
+            "车型映射 Excel"
         )
         car_row.addWidget(self.car_file_edit, 1)
 
@@ -142,13 +142,6 @@ class SettingsPage(QScrollArea):
 
         self.shell_password_hint = CaptionLabel("", card)
         inner.addWidget(self.shell_password_hint)
-
-        inner.addWidget(
-            CaptionLabel(
-                "壳牌和 SDCC 是两套独立账号；密码同样只存凭据管理器",
-                card,
-            )
-        )
 
         return card
 
@@ -184,13 +177,6 @@ class SettingsPage(QScrollArea):
 
         inner.addLayout(form)
 
-        inner.addWidget(
-            CaptionLabel(
-                "需与 SDCC 导入弹窗里下拉选项的文字完全一致，否则会选不中",
-                card,
-            )
-        )
-
         return card
 
     def _build_advanced_card(self) -> CardWidget:
@@ -210,30 +196,6 @@ class SettingsPage(QScrollArea):
 
         self.api_credential_hint = CaptionLabel("", card)
         inner.addWidget(self.api_credential_hint)
-
-        self.headless_switch = self._switch_row(
-            card,
-            inner,
-            "后台静默运行",
-            "开启后不弹出浏览器窗口。首次调试建议先关着，方便看到卡在哪一步",
-        )
-
-        self.autostart_switch = self._switch_row(
-            card,
-            inner,
-            "开机自启",
-            "开机后自动驻留托盘，不弹窗口（仅 Windows）",
-        )
-
-        if not autostart.supported():
-            self.autostart_switch.setEnabled(False)
-
-        self.tray_switch = self._switch_row(
-            card,
-            inner,
-            "关闭窗口时最小化到托盘",
-            "关掉后定时任务仍然生效；关闭本项则点叉直接退出程序",
-        )
 
         return card
 
@@ -280,10 +242,6 @@ class SettingsPage(QScrollArea):
             1 if config.transfer_mode == "api" else 0
         )
 
-        self.headless_switch.setChecked(config.headless)
-        self.tray_switch.setChecked(config.minimize_to_tray)
-        self.autostart_switch.setChecked(autostart.is_enabled())
-
         self._refresh_password_hint()
         self._refresh_api_hint()
 
@@ -329,10 +287,6 @@ class SettingsPage(QScrollArea):
             "api" if self.transfer_mode_combo.currentIndex() == 1 else "rpa"
         )
 
-        config.headless = self.headless_switch.isChecked()
-        config.minimize_to_tray = self.tray_switch.isChecked()
-        config.autostart = self.autostart_switch.isChecked()
-
         config.save()
 
         shell_password = self.shell_password_edit.text()
@@ -349,9 +303,6 @@ class SettingsPage(QScrollArea):
                 self._warn("壳牌密码保存失败（请先填壳牌账号）")
 
 
-
-        if autostart.supported():
-            autostart.apply(config.autostart)
 
         self._refresh_password_hint()
         self._refresh_api_hint()
@@ -378,8 +329,6 @@ class SettingsPage(QScrollArea):
             1 if defaults.transfer_mode == "api" else 0
         )
 
-        self.headless_switch.setChecked(defaults.headless)
-        self.tray_switch.setChecked(defaults.minimize_to_tray)
 
     def _warn(self, message: str) -> None:
         InfoBar.warning(

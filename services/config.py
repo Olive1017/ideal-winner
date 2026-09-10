@@ -98,10 +98,6 @@ def log_dir() -> Path:
     return _sub_dir("日志")
 
 
-def screenshot_dir() -> Path:
-    return _sub_dir("截图")
-
-
 def resource_path(relative: str) -> Path:
     """assets 资源路径，兼容 PyInstaller 打包后的临时解压目录。"""
     base = getattr(sys, "_MEIPASS", None)
@@ -212,12 +208,10 @@ class Config:
 
     # 浏览器
     browser_channels: List[str] = field(default_factory=lambda: ["chrome", "msedge"])
-    headless: bool = False
     timeout_ms: int = 100_000
     result_timeout_ms: int = 120_000
 
-    # 其他
-    autostart: bool = False
+    # 运行窗口
     minimize_to_tray: bool = True
 
     @classmethod

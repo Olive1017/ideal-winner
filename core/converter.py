@@ -128,7 +128,7 @@ def delivery_key(value) -> str:
     """交货单号的匹配键。
 
     车型映射表和订单表两侧必须都走这个函数，否则会匹配不上并静默变成「未知」。
-    这正是旧版最隐蔽的一个 bug：车型表补零到 10 位，订单表却拿原值去 map。
+    这正是旧版最隐蔽的一个 bug：表补零到 10 位，订单表却拿原值去 map。
     """
     text = clean_text(value)
     if not text:

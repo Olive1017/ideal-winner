@@ -13,7 +13,7 @@ import sys
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import (
     FluentWindow,
@@ -25,7 +25,7 @@ from qfluentwidgets import (
 )
 
 from core.models import UploadStatus
-from services.config import Config
+from services.config import Config, archive_dir
 from services.scheduler import UploadScheduler
 from services.single_instance import app_lock
 
@@ -51,6 +51,7 @@ class MainWindow(FluentWindow):
     def __init__(self, start_minimized: bool = False) -> None:
         super().__init__()
         self.config = Config.load()
+        self._start_minimized = start_minimized
         self._force_quit = False
         self._worker = None
 
@@ -65,9 +66,6 @@ class MainWindow(FluentWindow):
         self._next_run_timer.timeout.connect(self._refresh_next_run)
         self._next_run_timer.start()
         self._refresh_next_run()
-
-        if start_minimized:
-            self.hide()
 
     # ------------------------------------------------------------ 初始化
 
@@ -151,8 +149,18 @@ class MainWindow(FluentWindow):
         self._start_worker(force_export=False)
 
     def _start_reexport(self) -> None:
-        """强制拉最新：无视队列，重新从壳牌导出再跑整条流水线。"""
-        self._start_worker(force_export=True)
+        """重新上传归档中的历史文件，不再强制重导出。"""
+        archive_path = archive_dir()
+        archive_path.mkdir(parents=True, exist_ok=True)
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择要重新上传的归档文件",
+            str(archive_path),
+            "Excel Files (*.xlsx *.xls)",
+        )
+        if not file_path:
+            return
+        self._start_worker(force_export=False, file_path=file_path)
 
     def _start_worker(
         self, force_export: bool = False, file_path: Optional[str] = None
@@ -265,6 +273,8 @@ def run_app(start_minimized: bool = False) -> int:
     setTheme(Theme.AUTO)
 
     window = MainWindow(start_minimized=start_minimized)
-    if not start_minimized:
+    if start_minimized:
+        window.showMinimized()
+    else:
         window.show()
     return app.exec()

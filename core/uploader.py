@@ -70,45 +70,12 @@ NAV_MENU_TIMEOUT_MS = 10_000
 # 辅助
 # --------------------------------------------------------------------------- #
 
-def _capture_screenshot(
-    page,
-    screenshot_dir: Optional[Path],
-    run_id: str,
-) -> Optional[str]:
-    """出错时截图，方便定位卡在哪一步。"""
-    if screenshot_dir is None or page is None:
-        return None
-
-    try:
-        screenshot_dir.mkdir(parents=True, exist_ok=True)
-
-        stamp = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-        target = screenshot_dir / f"{stamp}_error.png"
-
-        page.screenshot(
-            path=str(target),
-            full_page=True,
-        )
-
-        return str(target)
-
-    except Exception:
-        return None
-
-
 def _launch_browser(
     playwright,
     config,
     logger,
-    headless: Optional[bool] = None,
 ):
     channels = list(config.browser_channels or ["chrome"])
-
-    want_headless = (
-        bool(config.headless)
-        if headless is None
-        else bool(headless)
-    )
 
     last_error: Optional[Exception] = None
 
@@ -116,7 +83,7 @@ def _launch_browser(
         try:
             browser = playwright.chromium.launch(
                 channel=channel,
-                headless=want_headless,
+                headless=False,
             )
 
             logger.info(
@@ -823,7 +790,6 @@ def upload_file(
     file_path: PathLike,
     config,
     logger=None,
-    screenshot_dir: Optional[PathLike] = None,
     progress: ProgressCallback = None,
 ) -> str:
     """上传一个文件到 SDCC，返回结果文案。
@@ -841,17 +807,6 @@ def upload_file(
             ErrorKind.FATAL,
         )
 
-    shot_dir = (
-        Path(screenshot_dir)
-        if screenshot_dir
-        else None
-    )
-
-    run_id = getattr(
-        logger,
-        "run_id",
-        "",
-    )
 
     def report(
         step: str,
@@ -880,7 +835,6 @@ def upload_file(
             playwright,
             config,
             logger,
-            headless=False,
         )
 
         # 每次都是全新的 context。
@@ -1010,14 +964,6 @@ def upload_file(
 
         except UploadError as exc:
 
-            if not exc.detail:
-
-                exc.detail = _capture_screenshot(
-                    page,
-                    shot_dir,
-                    run_id,
-                )
-
             report(
                 "upload",
                 "fail",
@@ -1028,12 +974,6 @@ def upload_file(
 
         except PlaywrightTimeout as exc:
 
-            shot = _capture_screenshot(
-                page,
-                shot_dir,
-                run_id,
-            )
-
             report(
                 "upload",
                 "fail",
@@ -1043,16 +983,9 @@ def upload_file(
             raise UploadError(
                 f"页面操作超时：{exc}",
                 ErrorKind.RETRYABLE,
-                shot,
             ) from exc
 
         except PlaywrightError as exc:
-
-            shot = _capture_screenshot(
-                page,
-                shot_dir,
-                run_id,
-            )
 
             report(
                 "upload",
@@ -1063,7 +996,6 @@ def upload_file(
             raise UploadError(
                 f"浏览器操作失败：{exc}",
                 ErrorKind.RETRYABLE,
-                shot,
             ) from exc
 
         finally:
@@ -1073,5 +1005,7 @@ def upload_file(
             except PlaywrightError:
                 pass
 
-            finally:
+            try:
                 browser.close()
+            except PlaywrightError:
+                pass

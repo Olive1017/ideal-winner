@@ -294,7 +294,6 @@ def export_orders(
     password: str = "",
     *,
     progress: ProgressCallback = None,
-    headless: Optional[bool] = None,
     run_id: Optional[str] = None,
 ) -> Path:
     """从壳牌 LMS 导出装运单，返回下载到本地的 xlsx 路径。
@@ -325,7 +324,7 @@ def export_orders(
 
     report("browser", "start", "启动浏览器")
     with sync_playwright() as playwright:
-        browser = _launch_browser(playwright, config, logger, headless=headless)
+        browser = _launch_browser(playwright, config, logger)
         # 导出要接收下载，必须开 accept_downloads
         context = browser.new_context(accept_downloads=True)
         context.set_default_timeout(config.timeout_ms)
@@ -387,7 +386,6 @@ if __name__ == "__main__":
             logger=RunLogger(console=True),
             password=pwd,
             progress=_print,
-            headless=False,
         )
         print(f"\n导出成功：{path}")
     except Exception as exc:  # noqa: BLE001

@@ -20,7 +20,6 @@ from .config import (
     clear_stale_outbox,
     data_dir_configured,
     latest_outbox,
-    screenshot_dir,
     sdcc_file_name,
     sdcc_orders_dir,
 )
@@ -259,7 +258,6 @@ def upload_order(
                     file_path=target,
                     config=config,
                     logger=logger,
-                    screenshot_dir=screenshot_dir(),
                     progress=progress,
                 )
             archived = archive_outbox(target, success=True)

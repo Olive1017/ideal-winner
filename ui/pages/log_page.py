@@ -23,7 +23,7 @@ from qfluentwidgets import (
     TextBrowser,
 )
 
-from services.config import log_dir
+
 from services.logger import group_by_run, read_entries
 
 AUTO_REFRESH_MS = 5000
@@ -64,14 +64,6 @@ class LogPage(QWidget):
         header.addWidget(SubtitleLabel("日志", self))
         header.addStretch(1)
 
-        refresh_btn = PushButton("刷新", self)
-        refresh_btn.clicked.connect(self.refresh)
-        header.addWidget(refresh_btn)
-
-        open_btn = PushButton("打开日志目录", self)
-        open_btn.clicked.connect(self._open_log_dir)
-        header.addWidget(open_btn)
-        layout.addLayout(header)
 
         body = QHBoxLayout()
         body.setSpacing(16)
@@ -162,10 +154,3 @@ class LogPage(QWidget):
         self.detail.setHtml("".join(parts))
 
     # -------------------------------------------------------------- 其他
-
-    def _open_log_dir(self) -> None:
-        path = log_dir()
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer", str(path)])
-        else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))

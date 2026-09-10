@@ -148,7 +148,7 @@ class AutoPage(QScrollArea):
 
         inner.addWidget(
             CaptionLabel(
-                "壳牌订单、转换结果和归档都会放进这个文件夹，车型表也建议放这里。",
+                "壳牌订单、转换结果和归档都会放进这个文件夹",
                 card,
             )
         )
@@ -215,7 +215,7 @@ class AutoPage(QScrollArea):
         self.upload_btn.clicked.connect(self.uploadRequested)
         row.addWidget(self.upload_btn)
 
-        self.reexport_btn = self._btn(PushButton("拉取最新订单", card), 120)
+        self.reexport_btn = self._btn(PushButton("上传归档", card), 120)
         self.reexport_btn.clicked.connect(self.reexportRequested)
         row.addWidget(self.reexport_btn)
 
@@ -258,7 +258,7 @@ class AutoPage(QScrollArea):
         """把配置回写到控件，不触发 settingsChanged。"""
         self._config = config
         self.switch_caption.setText(
-            "开启后程序驻留托盘，每天定时导出 → 转换 → API 自动上传，全程无人值守。"
+            "开启后程序驻留托盘，每天定时导出 → 转换 → API 自动上传"
             if config.transfer_mode == "api"
             else "开启后程序驻留托盘，每天定时从壳牌导出订单并转换成 SDCC 格式，不自动上传 SDCC。"
         )
@@ -294,7 +294,7 @@ class AutoPage(QScrollArea):
                 f"待上传订单：{len(files)} 个（最新：{latest.name} {stamp}）"
             )
             self.plan_label.setText(
-                "点「开始处理」直接上传最新一份；不信任队列就点「强制拉最新」重新导出。"
+                "点「开始处理」直接上传最新一份；需要重传历史文件就点「上传归档」。"
             )
 
         self.upload_btn.setEnabled(True)

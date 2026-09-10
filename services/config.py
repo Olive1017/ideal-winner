@@ -202,7 +202,7 @@ class Config:
         # SDCC API 直传（transfer_mode = "api" 时生效）
     transfer_mode: str = "rpa"  # rpa=浏览器人工上传（兜底）；api=HTTP 接口直传
     api_base_url: str = "https://api.sinotrans.com"  
-    data_source_from: str = ""  # 网关鉴权的来源标识，SDCC 方提供
+    data_source_from: str = "zhqpsz"  
     api_item_code: str = "HN_SZ_ZHQPSZ"  # orderInfo.itemCode 项目编码，SDCC 方提供
 
     # 自动准备（每天定时导出+转换，不自动上传 SDCC）

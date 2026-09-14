@@ -1,0 +1,340 @@
+"""设置页：账号密码、壳牌导出、项目模板、API 直传、浏览器与开机自启。
+
+密码和 API 密钥不进配置文件，只进 Windows 凭据管理器；输入框里也不回显，
+只用一个「已保存」状态提示。
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QFrame,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    InfoBar,
+    InfoBarPosition,
+    LineEdit,
+    PasswordLineEdit,
+    PrimaryPushButton,
+    PushButton,
+    StrongBodyLabel,
+    SubtitleLabel,
+    SwitchButton,
+)
+
+from core.api_uploader import KEYRING_API_KEY, KEYRING_KEY_ID
+from services import autostart, credentials
+from services.config import Config
+
+EXCEL_FILTER = "Excel 文件 (*.xlsx *.xls)"
+
+TRANSFER_MODES = ("浏览器上传（人工登录）", "API 直传")
+
+
+class SettingsPage(QScrollArea):
+    """设置页。保存后把新 Config 发给主窗口，由主窗口去重建调度器。"""
+
+    configSaved = Signal(object)  # Config
+
+    def __init__(self, config: Config, parent=None) -> None:
+        super().__init__(parent)
+
+        self.setObjectName("settingsPage")
+
+        # 只增加滚动能力，不改变原来的页面布局
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._config = config
+
+        # 原来的内容全部放进滚动区域
+        self._content = QWidget()
+        self.setWidget(self._content)
+
+        self._build_ui()
+        self.load_config(config)
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self._content)
+        layout.setContentsMargins(28, 20, 28, 20)
+        layout.setSpacing(16)
+
+        layout.addWidget(SubtitleLabel("设置", self._content))
+        layout.addWidget(self._build_shell_card())
+        layout.addWidget(self._build_import_card())
+        layout.addWidget(self._build_advanced_card())
+
+        buttons = QHBoxLayout()
+
+        self.save_btn = PrimaryPushButton("保存设置", self._content)
+        self.save_btn.clicked.connect(self._save)
+        buttons.addWidget(self.save_btn)
+
+        reset_btn = PushButton("恢复默认值", self._content)
+        reset_btn.clicked.connect(self._reset_defaults)
+        buttons.addWidget(reset_btn)
+
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        layout.addStretch(1)
+
+    def _build_shell_card(self) -> CardWidget:
+        card = CardWidget(self)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 16, 20, 16)
+        inner.setSpacing(10)
+        inner.addWidget(StrongBodyLabel("壳牌 LMS（导出源数据）", card))
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.shell_username_edit = LineEdit(card)
+        self.shell_username_edit.setPlaceholderText("壳牌 LMS 账号")
+        self.shell_username_edit.editingFinished.connect(
+            self._refresh_password_hint
+        )
+        form.addRow(BodyLabel("账号", card), self.shell_username_edit)
+
+        self.shell_password_edit = PasswordLineEdit(card)
+        self.shell_password_edit.setPlaceholderText("留空则不修改已保存的密码")
+        form.addRow(BodyLabel("密码", card), self.shell_password_edit)
+
+        self.shell_login_url_edit = LineEdit(card)
+        form.addRow(BodyLabel("登录地址", card), self.shell_login_url_edit)
+
+        self.export_region_edit = LineEdit(card)
+        self.export_region_edit.setPlaceholderText("如：粤西粤北区域")
+        form.addRow(BodyLabel("导出区域", card), self.export_region_edit)
+
+        inner.addLayout(form)
+
+        # 车型映射文件：路径 + 浏览
+        car_row = QHBoxLayout()
+        car_row.setSpacing(8)
+
+        car_row.addWidget(BodyLabel("车型表", card))
+
+        self.car_file_edit = LineEdit(card)
+        self.car_file_edit.setPlaceholderText(
+            "车型映射 Excel"
+        )
+        car_row.addWidget(self.car_file_edit, 1)
+
+        car_browse = PushButton("浏览", card)
+        car_browse.clicked.connect(self._browse_car_file)
+        car_row.addWidget(car_browse)
+
+        inner.addLayout(car_row)
+
+        self.shell_password_hint = CaptionLabel("", card)
+        inner.addWidget(self.shell_password_hint)
+
+        return card
+
+    def _browse_car_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择车型映射文件",
+            "",
+            EXCEL_FILTER,
+        )
+
+        if path:
+            self.car_file_edit.setText(path)
+
+    def _build_import_card(self) -> CardWidget:
+        card = CardWidget(self)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 16, 20, 16)
+        inner.setSpacing(10)
+        inner.addWidget(StrongBodyLabel("导入参数", card))
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.project_edit = LineEdit(card)
+        form.addRow(BodyLabel("项目", card), self.project_edit)
+
+        self.template_edit = LineEdit(card)
+        form.addRow(BodyLabel("模板", card), self.template_edit)
+
+        self.login_url_edit = LineEdit(card)
+        form.addRow(BodyLabel("登录地址", card), self.login_url_edit)
+
+        inner.addLayout(form)
+
+        return card
+
+    def _build_advanced_card(self) -> CardWidget:
+        card = CardWidget(self)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(20, 16, 20, 16)
+        inner.setSpacing(12)
+        inner.addWidget(StrongBodyLabel("运行方式", card))
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(BodyLabel("上传方式", card))
+        self.transfer_mode_combo = ComboBox(card)
+        self.transfer_mode_combo.addItems(list(TRANSFER_MODES))
+        mode_row.addWidget(self.transfer_mode_combo, 1)
+        inner.addLayout(mode_row)
+
+        self.api_credential_hint = CaptionLabel("", card)
+        inner.addWidget(self.api_credential_hint)
+
+        return card
+
+    def _switch_row(
+        self,
+        card,
+        layout,
+        title: str,
+        caption: str,
+    ) -> SwitchButton:
+        row = QHBoxLayout()
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addWidget(BodyLabel(title, card))
+        text.addWidget(CaptionLabel(caption, card))
+
+        row.addLayout(text)
+        row.addStretch(1)
+
+        switch = SwitchButton(card)
+        switch.setOnText("开")
+        switch.setOffText("关")
+        row.addWidget(switch)
+
+        layout.addLayout(row)
+
+        return switch
+
+    # -------------------------------------------------------------- 数据
+    def load_config(self, config: Config) -> None:
+        self._config = config
+
+        self.shell_username_edit.setText(config.shell_username)
+        self.shell_login_url_edit.setText(config.shell_login_url)
+        self.export_region_edit.setText(config.export_region)
+        self.car_file_edit.setText(config.car_file)
+
+        self.project_edit.setText(config.project)
+        self.template_edit.setText(config.template)
+        self.login_url_edit.setText(config.login_url)
+
+        self.transfer_mode_combo.setCurrentIndex(
+            1 if config.transfer_mode == "api" else 0
+        )
+
+        self._refresh_password_hint()
+        self._refresh_api_hint()
+
+    def _refresh_password_hint(self) -> None:
+        if not credentials.available():
+            msg = "⚠ 未安装 keyring，无法保存密码：pip install keyring"
+            self.shell_password_hint.setText(msg)
+            return
+
+        shell_user = self.shell_username_edit.text().strip()
+
+        self.shell_password_hint.setText(
+            "✓ 已保存密码"
+            if shell_user and credentials.has_password(shell_user)
+            else "尚未保存密码"
+        )
+
+    def _refresh_api_hint(self) -> None:
+        if not credentials.available():
+            self.api_credential_hint.setText("")
+            return
+       
+        has_key = credentials.has_password(KEYRING_API_KEY)
+        self.api_credential_hint.setText(
+            "✓ keyId / apiKey 已保存"
+            if has_key
+            else "尚未保存 keyId / apiKey"
+        )
+
+    def _save(self) -> None:
+        config = self._config
+
+        config.project = self.project_edit.text().strip()
+        config.template = self.template_edit.text().strip()
+        config.login_url = self.login_url_edit.text().strip()
+
+        config.shell_username = self.shell_username_edit.text().strip()
+        config.shell_login_url = self.shell_login_url_edit.text().strip()
+        config.export_region = self.export_region_edit.text().strip()
+        config.car_file = self.car_file_edit.text().strip()
+
+        config.transfer_mode = (
+            "api" if self.transfer_mode_combo.currentIndex() == 1 else "rpa"
+        )
+
+        config.save()
+
+        shell_password = self.shell_password_edit.text()
+
+        if shell_password:
+            shell_user = config.shell_username
+
+            if shell_user and credentials.set_password(
+                shell_user,
+                shell_password,
+            ):
+                self.shell_password_edit.clear()
+            else:
+                self._warn("壳牌密码保存失败（请先填壳牌账号）")
+
+
+
+        self._refresh_password_hint()
+        self._refresh_api_hint()
+        self.configSaved.emit(config)
+
+        InfoBar.success(
+            "已保存",
+            "设置已生效",
+            duration=2500,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )
+
+    def _reset_defaults(self) -> None:
+        defaults = Config()
+
+        self.project_edit.setText(defaults.project)
+        self.template_edit.setText(defaults.template)
+        self.login_url_edit.setText(defaults.login_url)
+        self.shell_login_url_edit.setText(defaults.shell_login_url)
+        self.export_region_edit.setText(defaults.export_region)
+
+        self.transfer_mode_combo.setCurrentIndex(
+            1 if defaults.transfer_mode == "api" else 0
+        )
+
+
+    def _warn(self, message: str) -> None:
+        InfoBar.warning(
+            "提示",
+            message,
+            duration=4000,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )

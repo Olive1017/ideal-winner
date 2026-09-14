@@ -1,0 +1,81 @@
+"""后台线程。
+
+转换要读几千行 Excel，上传要开浏览器跑几十秒——都不能放在 UI 线程，
+否则窗口会直接卡死变白。结果通过信号回主线程。
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from PySide6.QtCore import QThread, Signal
+
+from core.converter import convert
+from core.models import ConvertError, UploadResult, UploadStatus
+from services.config import Config
+from services.scheduler import upload_order
+
+
+class ConvertWorker(QThread):
+    """后台执行转换。"""
+
+    succeeded = Signal(object)  # ConvertResult
+    failed = Signal(str)
+
+    def __init__(self, shell_file: str, car_file: Optional[str], parent=None) -> None:
+        super().__init__(parent)
+        self.shell_file = shell_file
+        self.car_file = car_file
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            result = convert(self.shell_file, self.car_file)
+        except ConvertError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - 线程里抛异常会静默死掉
+            self.failed.emit(f"转换出现未预期错误：{exc}")
+        else:
+            self.succeeded.emit(result)
+
+
+class UploadWorker(QThread):
+    """后台执行一次流水线（导出→转换→上传），实时向 UI 报进度。
+
+    force_export=True 时忽略待上传队列，强制从壳牌重新导出最新订单再走后续流程。
+    """
+
+    progressed = Signal(str, str, str)  # step, status, message
+    finishedResult = Signal(object)  # UploadResult
+
+    def __init__(
+        self,
+        config: Config,
+        file_path: Optional[str] = None,
+        force_export: bool = False,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.config = config
+        self.file_path = file_path
+        self.force_export = force_export
+
+    def run(self) -> None:  # noqa: D102
+        def progress(step: str, status: str, message: str) -> None:
+            self.progressed.emit(step, status, message)
+
+        try:
+            # 人从界面/托盘点的「立即执行」：弹有头浏览器走人工登录，登完接着传
+            result = upload_order(
+                config=self.config,
+                file_path=self.file_path,
+                progress=progress,
+                force_export=self.force_export,
+            )
+        except Exception as exc:  # noqa: BLE001 - 兜底：异常也必须回信号，
+            # 否则 finishedResult 永远不发，UI 按钮会一直停在「运行中」置灰状态
+            result = UploadResult(
+                status=UploadStatus.FAILED,
+                message=f"任务出现未预期错误：{exc}",
+                retryable=False,
+            )
+        self.finishedResult.emit(result)
